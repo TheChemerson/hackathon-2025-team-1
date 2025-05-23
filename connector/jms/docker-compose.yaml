@@ -1,0 +1,10 @@
+services:
+  connector-file-to-events:
+    image: 'solace/solace-pubsub-connector-jms:1.0.0'
+    container_name: connector-jms
+    networks:
+      - demo-net
+    ports:
+      - 8096:8090
+    volumes:
+      - ./config/:/app/external/spring/config

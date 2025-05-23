@@ -1,0 +1,12 @@
+services:
+  connector-tibco:
+    image: solace/solace-pubsub-connector-tibcoems:1.0.0
+    platform: linux/amd64
+    container_name: connector-tibco
+    networks:
+      - demo-net
+    ports:
+      - 8094:8090
+    volumes:
+      - ./config/:/app/external/spring/config/:ro
+      - ./libs/:/app/external/libs/:ro

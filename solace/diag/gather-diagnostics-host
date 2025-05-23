@@ -1,0 +1,2200 @@
+#!/bin/sh
+# This will execute as a bash script first
+# If python3 exists, execute the script using 'python3 <>'
+# Otherwise, fall back to python (i.e. python2)
+''''which python3 >/dev/null 2>&1 && exec python3 "$0" "$@" # '''
+''''which python  >/dev/null 2>&1 && exec python  "$0" "$@" # '''
+''''exec echo "Error: Cannot find Python executable"        # '''
+
+#
+# This script gathers VMR diagnostics files and produces a compressed
+# tarball which can be shared with Solace support
+#
+
+import sys, argparse, os, traceback, errno, re, signal, time, socket, \
+       shutil, subprocess, tarfile, pprint, json, datetime, platform
+
+DIAGS_DIR = '/var/lib/solace/diags'
+
+# systemd utilities (journalctl) depend on the utf-8 character set, which
+# is the default for python3+
+#
+if sys.version_info.major < 3:
+    import imp
+    imp.reload(sys).setdefaultencoding('utf-8')
+
+# Check to see if the docker python module is available
+#
+try:
+    import docker
+    hasDockerModule_g = True
+except:
+    hasDockerModule_g = False
+
+# Classes for storing types (For Python2 compatibility, Enum cannot be used)
+#
+class ContainerRuntimeType:
+    UNKNOWN = 0
+    DOCKER = 1
+    PODMAN = 2
+
+class ContainerRuntimeInterfaceType:
+	UNKNOWN = 0
+	CLIENT = 1
+	API = 2
+
+class ContainerRuntimeErrors:
+    OK = 0
+    ERROR = 5
+    DENIED = 101
+
+
+# ContainerRuntime is the base class that specifies the runtime (docker, podman)
+# and the interface type (client, API). It should not be instantiated.
+#
+class ContainerRuntime:
+    def __init__(self):
+        self.containerRuntimeType = ContainerRuntimeType.UNKNOWN
+        self.containerRuntimeInterfaceType = ContainerRuntimeInterfaceType.UNKNOWN
+        self.userNsExcPrefixStr = None
+
+    @staticmethod
+    def determineContainerRuntime():
+        errno, stdout = Cmd([PodmanClient._CLIENT_PATH, 'version']).run()
+        if errno == 0:
+            return ContainerRuntimeType.PODMAN
+        else:
+            return ContainerRuntimeType.DOCKER
+
+    def __str__(self):
+        return self.desc
+
+    def getContainerRuntimeStr(self):
+        if self.containerRuntimeType == ContainerRuntimeType.DOCKER:
+            return "docker"
+        elif self.containerRuntimeType == ContainerRuntimeType.PODMAN:
+            return "podman"
+        else:
+            return "unknown"
+
+    def isRuntimeDocker(self):
+        return self.containerRuntimeType == ContainerRuntimeType.DOCKER
+
+    def isRuntimePodman(self):
+        return self.containerRuntimeType == ContainerRuntimeType.PODMAN
+
+    def usesClient(self):
+        return self.containerRuntimeInterfaceType == ContainerRuntimeInterfaceType.CLIENT
+
+    def usesPythonApi(self):
+        return self.containerRuntimeInterfaceType == ContainerRuntimeInterfaceType.API
+
+    @staticmethod
+    def rootlessMode():
+        return (int(os.getuid()) != 0)
+
+    @staticmethod
+    def getContainerRuntimePid(processName):
+        if processName is None:
+           return None
+        
+        cmdStr = ['pgrep', '-u', "{}".format(os.getuid()), '-n', '-x', '-f', "{}".format(processName)]
+        errno, stdout = Cmd(cmdStr).run()
+        if errno == 0:
+           return int(stdout)
+
+        return None
+
+    def userNsExcPrefix(self, processName):
+        if self.userNsExcPrefixStr is None:
+           ctrRuntimePid = self.getContainerRuntimePid(processName)
+           if ctrRuntimePid is not None:
+              self.userNsExcPrefixStr = ['nsenter', '-U', '-t', "{}".format(ctrRuntimePid)]
+
+        return self.userNsExcPrefixStr
+
+class DockerDaemonClient(ContainerRuntime):
+    if platform.system() == 'Darwin':
+        # macOS
+        _CLIENT_PATH = '/usr/local/bin/docker'
+    else:
+        # Linux
+        _CLIENT_PATH = '/usr/bin/docker'
+
+    def __init__(self, path=None):
+        ContainerRuntime.__init__(self)
+        if path:
+            self.path = path
+        else:
+            self.path = DockerDaemonClient._CLIENT_PATH
+        self.desc = "Docker client {}".format(self.path)
+        self.containerRuntimeType = ContainerRuntimeType.DOCKER
+        self.containerRuntimeInterfaceType = ContainerRuntimeInterfaceType.CLIENT
+
+        self.valid = True
+        if not os.path.isfile(self.path) or not os.access(self.path, os.X_OK):
+            errorsWarnings_g.dockerClientError = self.path
+            self.valid = False
+
+    @staticmethod
+    def _denied():
+        return ContainerRuntimeErrors.DENIED, "Docker client permission denied"
+
+    @staticmethod
+    def _error(s):
+        return ContainerRuntimeErrors.ERROR, s
+
+    @staticmethod
+    def _ok(s):
+        return ContainerRuntimeErrors.OK, s
+
+    def diff(self, cid):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'diff', cid]).run()
+
+    def version(self):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'version']).run()
+
+    def info(self):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'info']).run()
+
+    def images(self, All=False):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'images']
+        if All:
+            cmd.append('--all')
+        return Cmd(cmd).run()
+
+    def stats(self, All=False, Id=None, NoStream=False, NoTrunc=False):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'stats']
+        if All:
+            cmd.append('--all')
+        if NoStream:
+            cmd.append('--no-stream')
+        if NoTrunc:
+            cmd.append('--no-trunc')
+        if Id:
+            cmd.append(Id)
+        return Cmd(cmd).run()
+
+    def ps(self, quiet=False, All=False):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'ps']
+        if All:
+            cmd.append('--all')
+        if quiet:
+            cmd.append('-q')
+        return Cmd(cmd).run()
+
+    def find(self, image, All=False):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'ps', '--quiet', '--filter', "ancestor={}".format(image)]
+        if All:
+            cmd.append('--all')
+        return Cmd(cmd).run()
+
+    def inspect(self, cid):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'inspect', cid]).run()
+
+    def field(self, cid, key):
+        try:
+            cid = re.sub(r'"', '', cid)
+            errno, stdout = self.inspect(cid)
+            if errno or not re.match(r'\S', stdout):
+                return DockerDaemonClient._error("")
+            res = json.loads(stdout)[0]
+            for k in key.split('.'):
+                if k in res:
+                    res = res[k]
+                else:
+                    raise KeyError('not found')
+            return DockerDaemonClient._ok(json.dumps(res))
+        except:
+            return DockerDaemonClient._error("")
+
+    def cp(self, cid, src, dest, Timeout=30):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'cp', "{}:{}".format(cid, src), dest], Timeout).run()
+
+    def exc(self, cid, ecmd, Timeout=30, AllowErrno=None):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'exec', cid]
+        cmd.extend(ecmd)
+        return Cmd(cmd, Timeout, AllowErrno).run()
+
+    def logs(self, cid, Timestamps=False):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        cmd = [self.path, 'logs']
+        if Timestamps:
+            cmd.append('--timestamps')
+        cmd.append(cid)
+        return Cmd(cmd).run()
+
+    def inspect_vol(self, vol):
+        if not self.valid:
+            return DockerDaemonClient._denied()
+        return Cmd([self.path, 'volume', 'inspect', vol]).run()
+
+    @staticmethod
+    def rootlessMode():
+        # not supported
+        return False
+
+    @staticmethod
+    def getContainerRuntimePid(processName):
+        ctrRuntimePid = ContainerRuntime.getContainerRuntimePid(processName)
+        if ctrRuntimePid is not None:
+           return ctrRuntimePid
+
+        dockerPidDir = os.getenv("XDG_RUNTIME_DIR")
+        if dockerPidDir is None:
+           dockerPidDir = "/run/user/{}".format(os.getuid())
+
+        if os.path.exists(dockerPidDir):
+            cmdStr = ['cat', "{}/docker.pid".format(dockerPidDir)]
+            errno, stdout = Cmd(cmdStr).run()
+            if errno == 0:
+               return int(stdout)
+
+        return None
+
+    def userNsExcPrefix(self, processName=None):
+        prefixStr = super(self.__class__, self).userNsExcPrefix("dockerd")
+        return prefixStr
+
+class DockerDaemonApi(ContainerRuntime):
+    _UNIX_SOCKET = 'unix://var/run/docker.sock'
+
+    def __init__(self, sock=None):
+        ContainerRuntime.__init__(self)
+        if sock:
+            self.sock = "unix:/{}".format(sock)
+        else:
+            self.sock = DockerDaemonApi._UNIX_SOCKET
+        self.desc = "Python API {}".format(self.sock)
+        self.containerRuntimeType = ContainerRuntimeType.DOCKER
+        self.containerRuntimeInterfaceType = ContainerRuntimeInterfaceType.API
+
+        try:
+            self.client = docker.DockerClient(base_url=self.sock)
+            self.apiclient = docker.APIClient(base_url=self.sock)
+            self.valid = True
+        except Exception as e:
+            self.valid = False
+
+    class _uprint(pprint.PrettyPrinter):
+        def format(self, object, context, maxlevels, level):
+            if sys.version_info.major < 3 and isinstance(object, unicode):
+                return (object, True, False)
+            if sys.version_info.major >= 3 and isinstance(object, bytes):
+                return (object, True, False)
+            return pprint.PrettyPrinter.format(self, object, context, maxlevels, level)
+
+    @staticmethod
+    def _denied():
+        return ContainerRuntimeErrors.DENIED, "Docker API socket permission denied"
+
+    @staticmethod
+    def _error(e):
+        return ContainerRuntimeErrors.ERROR, "Server error ({})".format(e)
+
+    @staticmethod
+    def _ok(res=""):
+        return ContainerRuntimeErrors.OK, DockerDaemonApi._uprint().pformat(res)
+
+    @staticmethod
+    def _ok_list(res=""):
+        return ContainerRuntimeErrors.OK, res
+
+    def diff(self, cid):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok(self.client.containers.get(cid).diff())
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def version(self):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok(self.client.version())
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def info(self):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok(self.client.info())
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def images(self, All=False):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok(self.client.images.list(all=All))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def stats(self, All=False, Id=None, NoStream=False, NoTrunc=False):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            stream = not NoStream
+            if All:
+                res = []
+                for cid in self.apiclient.containers(quiet=True):
+                    res.append(self.apiclient.stats(cid['Id'], stream=stream))
+                return DockerDaemonApi._ok(res)
+            if Id:
+                return DockerDaemonApi._ok(self.apiclient.stats(Id, stream=stream))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def ps(self, All=False, quiet=False):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok_list(self.apiclient.containers(quiet=quiet,all=All))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def find(self, image, All=False):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            res = []
+            containers = self.client.containers.list(all=True, filters={'ancestor' : self.client.images.get(image).short_id})
+            for container in containers:
+                res.append(container.id)
+            return DockerDaemonApi._ok("\n".join(res))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def inspect(self, cid):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            return DockerDaemonApi._ok(self.apiclient.inspect_container(cid))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def field(self, cid, key):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            res = self.apiclient.inspect_container(cid)
+            for k in key.split('.'):
+                if k in res:
+                    res = res[k]
+                else:
+                    raise KeyError('not found')
+            return DockerDaemonApi._ok(res)
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def cp(self, cid, src, dest, Timeout=30):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            tmp = "{}.tmp.tgz".format(dest)
+            strm, stat = self.client.containers.get(cid).get_archive(src)
+            with open(tmp, "wb") as f:
+                for b in strm:
+                    f.write(b)
+            with tarfile.open(tmp) as t:
+                t.extractall(os.path.dirname(dest))
+            os.unlink(tmp)
+            return DockerDaemonApi._ok()
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def exc(self, cid, ecmd, Timeout=30, AllowErrno=None):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            errno, stdout = self.client.containers.get(cid).exec_run(" ".join(ecmd))
+            if AllowErrno is not None and errno in AllowErrno:
+                errno = 0
+            return errno, stdout.decode('utf8')
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    def logs(self, cid, Timestamps=False):
+        if not self.valid:
+            return DockerDaemonApi._denied()
+        try:
+            res = self.client.containers.get(cid).logs(timestamps=Timestamps).decode('utf8')
+            return DockerDaemonApi._ok(res.split("\n"))
+        except Exception as e:
+            return DockerDaemonApi._error(e)
+
+    @staticmethod
+    def rootlessMode():
+        # not supported
+        return False
+
+    def userNsExcPrefix(self, processName=None):
+        # not supported
+        return None
+
+class PodmanClient(ContainerRuntime):
+    _CLIENT_PATH = '/usr/bin/podman'
+
+    def __init__(self, path=None):
+        ContainerRuntime.__init__(self)
+        if path:
+            self.path = path
+        else:
+            self.path = PodmanClient._CLIENT_PATH
+        self.desc = "Podman client {}".format(self.path)
+        self.containerRuntimeType = ContainerRuntimeType.PODMAN
+        self.containerRuntimeInterfaceType = ContainerRuntimeInterfaceType.CLIENT
+
+        self.valid = True
+        if not os.path.isfile(self.path) or not os.access(self.path, os.X_OK):
+            errorsWarnings_g.podmanClientError = self.path
+            self.valid = False
+
+    @staticmethod
+    def _denied():
+        return ContainerRuntimeErrors.DENIED, "Podman client permission denied"
+
+    @staticmethod
+    def _error(s):
+        return ContainerRuntimeErrors.ERROR, s
+
+    @staticmethod
+    def _ok(s):
+        return ContainerRuntimeErrors.OK, s
+
+    def diff(self, cid):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'diff', cid]).run()
+
+    def version(self):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'version']).run()
+
+    def info(self):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'info']).run()
+
+    def images(self, All=False):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'images']
+        if All:
+            cmd.append('--all')
+        return Cmd(cmd).run()
+
+    def stats(self, All=False, Id=None, NoStream=False, NoTrunc=False):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'stats']
+        if All:
+            cmd.append('--all')
+        if NoStream:
+            cmd.append('--no-stream')
+        if NoTrunc:
+            # Currently podman v3.0.1 does not have option for --no-trunc
+            # cmd.append('--no-trunc')
+            pass
+        if Id:
+            cmd.append(Id)
+        return Cmd(cmd).run()
+
+    def ps(self, quiet=False, All=False):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'ps']
+        if All:
+            cmd.append('--all')
+        if quiet:
+            cmd.append('-q')
+        return Cmd(cmd).run()
+
+    def find(self, image, All=False):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'ps', '--quiet', '--filter', "ancestor={}".format(image)]
+        if All:
+            cmd.append('--all')
+        return Cmd(cmd).run()
+
+    def inspect(self, cid):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'inspect', cid]).run()
+
+    def field(self, cid, key):
+        try:
+            cid = re.sub(r'"', '', cid)
+            errno, stdout = self.inspect(cid)
+            if errno or not re.match(r'\S', stdout):
+                return PodmanClient._error("")
+            res = json.loads(stdout)[0]
+            for k in key.split('.'):
+                if k in res:
+                    res = res[k]
+                else:
+                    raise KeyError('not found')
+            return PodmanClient._ok(json.dumps(res))
+        except:
+            return PodmanClient._error("")
+
+    def cp(self, cid, src, dest, Timeout=30):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'cp', "{}:{}".format(cid, src), dest], Timeout).run()
+
+    def exc(self, cid, ecmd, Timeout=30, AllowErrno=None):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'exec', cid]
+        cmd.extend(ecmd)
+        return Cmd(cmd, Timeout, AllowErrno).run()
+
+    def logs(self, cid, Timestamps=False):
+        if not self.valid:
+            return PodmanClient._denied()
+        cmd = [self.path, 'logs']
+        if Timestamps:
+            cmd.append('--timestamps')
+        cmd.append(cid)
+        return Cmd(cmd).run()
+
+    def inspect_vol(self, vol):
+        if not self.valid:
+            return PodmanClient._denied()
+        return Cmd([self.path, 'volume', 'inspect', vol]).run()
+
+    def userNsExcPrefix(self, processName=None):
+        prefixStr = super(self.__class__, self).userNsExcPrefix("podman")
+        if prefixStr is None:
+           prefixStr = super(self.__class__, self).userNsExcPrefix("catatonit -P")
+        if prefixStr is None:
+           prefixStr = ['podman', 'unshare']
+        return prefixStr
+
+# Debug mode allows this script to run through all operations without
+# creating a staging area or output tarball
+#
+debugMode_g = False
+
+class ErrorsWarnings:
+    def __init__(self):
+        self.permissionError = False
+        self.dockerLogDriverWarning = False
+        self.dockerClientError = None
+        self.dockerApiError = None
+        self.podmanLogDriverWarning = None
+        self.podmanClientError = None
+
+    def logErrors(self):
+        if self.permissionError:
+            print ("\nNote:")
+            print ("Errors were detected during operation because permission was denied")
+            print ("on one or more files or directories (EACCES or EPERM).  The tarball may")
+            print ("be missing some diagnostic information. To collect missing information,")
+            print ("this utility should be run by a user with root or sudo privileges.")
+            print ("Running with sudo privileges is however not required when using")
+            print ("rootless containers.\n")
+        if self.dockerLogDriverWarning:
+            print ("\nNote:")
+            print ("The Docker logging driver being used is not the json-file driver.")
+            print ("Unable to package the docker json log driver inside tarball\n")
+        if self.dockerClientError:
+            print ("\nNote:")
+            print ("Execute access was denied to the docker client {}.  Many of the docker".format(self.dockerClientError))
+            print ("commands failed, check the path and permissions for the docker client.\n")
+        if self.dockerApiError:
+            print ("\nNote:")
+            print ("The docker API socket {} was not accessible.  Many of the docker".format(self.dockerApiError))
+            print ("commands failed, check the path and permissions for the docker API socket.\n")
+        if self.podmanLogDriverWarning:
+            print ("\nNote:")
+            print ("The Podman logging driver being used is not the k8s-file driver.")
+            print ("Unable to package the podman k8s-file log inside tarball\n")
+        if self.podmanClientError:
+            print ("\nNote:")
+            print ("Execute access was denied to the podman client {}.  Many of the podman".format(self.podmanClientError))
+            print ("commands failed, check the path and permissions for the podman client.\n")
+
+
+errorsWarnings_g = ErrorsWarnings()
+
+
+# Utility manifest generator
+#
+class Redirector:
+    def __init__(self, verbose, ManifestFile='gdh-manifest.txt', DiagnosticsFile='gdh-diagnostics.txt', LogFile='gdh-log.txt'):
+        self.verbose = verbose
+        self.files = {
+            'manifest' :    { 'filename' : ManifestFile,    'txt' : '', 'order' : 1, },
+            'diagnostics' : { 'filename' : DiagnosticsFile, 'txt' : '', 'order' : 2, },
+            'log' :         { 'filename' : LogFile,         'txt' : '', 'order' : 3, },
+        }
+
+    def manifest(self, txt):
+        if self.verbose > 2:
+            print("MFST: {}".format(txt))
+        self.files['manifest']['txt'] += "{}\n".format(txt)
+
+    @staticmethod
+    def __verbosity(level):
+        if level == 'ERROR': return 0
+        if level == 'WARN':  return 0
+        if level == 'INFO':  return 1
+        if level == 'DEBUG': return 2
+        return 99
+
+    def log(self, level, txt):
+        if self.verbose >= Redirector.__verbosity(level):
+            print("{}: {}".format(level, txt))
+        if level == 'MSG':
+            print("{}".format(txt))
+            txt = re.sub(r'^\s*', '', txt, flags=re.M|re.S)
+        self.files['log']['txt'] += "{}  {}: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f"), level, txt)
+
+    def diag(self, txt):
+        self.files['diagnostics']['txt'] += "{}\n".format(txt)
+
+    def logp(self, level, txt, eno):
+        if eno == errno.EACCES or eno == errno.EPERM:
+            errorsWarnings_g.permissionError = True
+            if self.verbose == 0:
+                self.files['log']['txt'] += "{}: {}\n".format(level, txt)
+                return
+        self.log(level, txt)
+
+    def writeFiles(self, stagingArea):
+        for f in sorted(self.files.items(), key=lambda i: (i[1]['order'], i[0])):
+            path = os.path.join(stagingArea.getPath(), f[1]['filename'])
+            self.log('INFO', "Writing {} file {}".format(f[0], path))
+            if not debugMode_g:
+                try:
+                    with open(path, 'w') as fh:
+                        fh.write(f[1]['txt'])
+                except Exception as e:
+                    self.logp('ERROR', "Unable to write {} file {}".format(f[0], path), e.errno)
+            stagingArea.add(path, arcname=f[1]['filename'])
+
+# Staging area for diagnostic files and manifests
+#
+class StagingArea:
+    DEFAULT_BASEDIR = '/tmp'
+
+    def __init__(self, tarname, days):
+
+        # Show the PubSub gather-diagnostics-host version
+        #
+        loadVersion = "soltr_10.6.1.52"
+        redirector_g.log('INFO', "gather-diagnostics-host version {}".format(loadVersion))
+
+        # Get the tarball filename (without extension)
+        #
+        self.tarname = tarname
+        if self.tarname is None:
+            self.tarname = StagingArea._getTarname(days)
+        redirector_g.log('INFO', "Creating gather-diagnostics tarball {}".format(self))
+
+        # Determine the staging area path and attempt to create the directory
+        #
+        self.path = StagingArea._getStagingPath(self.tarname)
+        redirector_g.log('INFO', "Creating staging area {}".format(self.path))
+        if not debugMode_g:
+            try:
+                os.makedirs(self.path)
+            except OSError as e:
+                if e.errno == errno.EEXIST and os.path.isdir(self.path):
+                    pass
+                else:
+                    redirector_g.log('ERROR', "Unable to create staging area ({}), retry with 'sudo'".format(e))
+                    sys.exit(errno.EPERM)
+
+        # Create a tarfile object
+        #
+        self.tarball = None
+        if not debugMode_g:
+            try:
+                self.tarball = tarfile.open(self.tarname, "w:gz", dereference=False)
+            except Exception as e:
+                redirector_g.log('ERROR', "Unable to open tarball {} ({})".format(self.tarname, e))
+                self.cleanup()
+                sys.exit(errno.EPERM)
+
+    @staticmethod
+    def _getTarname(days):
+        return os.path.join(StagingArea.DEFAULT_BASEDIR, "gather-diagnostics-host_{}d_{}_{}.tgz".format(days, socket.gethostname(), time.strftime("%Y-%m-%dT%H.%M.%S", time.localtime())))
+
+    @staticmethod
+    def _getStagingPath(tarname):
+        return os.path.join(os.path.dirname(tarname), "gather-staging.{}".format(os.getpid()))
+
+    def __str__(self):
+        return self.tarname
+
+    def getPath(self):
+        return self.path
+
+    def add(self, path, arcname=None, filter=None):
+        redirector_g.log('DEBUG', "Adding file {} to tarball {}".format(path, self.tarname))
+        if debugMode_g:
+            return True
+        prefix = os.path.splitext(os.path.basename(self.tarname))[0]
+        if arcname is None:
+            arcname = os.path.join(prefix, re.sub(r'^\/', '', path))
+        else:
+            arcname = os.path.join(prefix, re.sub(r'^\/', '', arcname))
+        try:
+            self.tarball.add(path, arcname=arcname, filter=filter)
+            return True
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to add file {} to tarball {} ({})".format(path, self.tarname, e), e.errno)
+            return False
+
+    def commit(self):
+        redirector_g.log('INFO', "Committing tarball {}".format(self.tarname))
+        if debugMode_g:
+            return
+        try:
+            self.tarball.close()
+            redirector_g.log('MSG', "\nCreated tarball {}".format(self.tarname))
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to commit tarball {} ({})".format(self.tarname, e), e.errno)
+
+    def cleanup(self):
+        redirector_g.log('INFO', "Cleaning up staging area {}".format(self.path))
+        if debugMode_g:
+            return
+        try:
+            if os.path.isdir(self.path):
+                shutil.rmtree(self.path)
+            else:
+                os.unlink(self.path)
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to remove staging area {} ({})".format(self.path, e), e.errno)
+
+# This class represents an Abstract file
+# All methods should be written by the subclass
+#
+class AbstractFile(object):
+    def __init__(self, file):
+        self.file = file
+
+# This class represents a host file
+#
+class HostFileType(AbstractFile):
+    def __init__(self, file):
+        AbstractFile.__init__(self,file)
+
+    def remove(self):
+        try:
+            os.unlink(self.file)
+        except:
+            pass
+            return
+        print("Removed File: {}".format(self.file))
+
+# This class represents a host file owned by a subordinate user
+#
+class UserNsFileType(AbstractFile):
+    def __init__(self, file):
+        AbstractFile.__init__(self,file)
+
+    def remove(self):
+        try:
+           prefixStr = containerRuntime_g.userNsExcPrefix()
+           subprocess.check_output(prefixStr + ["rm", self.file], stderr=subprocess.DEVNULL, encoding='utf-8')
+        except:
+            pass
+            return
+        print("Removed File: {}".format(self.file))
+
+# This class represents a container file
+#
+class ContainerFileType(AbstractFile):
+    def __init__(self, file, containerId):
+        AbstractFile.__init__(self, file)
+        self.containerId = containerId
+
+    def remove(self):
+        container = Container(self.containerId)
+        if container.rmFile(self.file):
+            print("Removed File: {}".format(self.file))
+
+# This class contains a list of file objects to remove
+#
+class FilesToBeRemoved:
+    def __init__(self):
+        self.Items = []
+
+    def add(self, filename, isContainerFile=False, containerId=None, userNsExc=False):
+        if args.no_cleanup:
+            return
+        redirector_g.log('WARN',
+                         "File {} marked for removal".format(filename));
+        if isContainerFile:
+            self.Items.append(ContainerFileType(filename, containerId))
+        elif userNsExc:
+            self.Items.append(UserNsFileType(filename))
+        else:
+            self.Items.append(HostFileType(filename))
+
+    def remove(self):
+        for item in self.Items:
+            item.remove()
+
+# Class to handle operations for a specific container instance
+#
+class Container:
+    def __init__(self, id):
+        self.id = re.sub(r'"', '', id)
+        self.name = None
+        self.running = False
+        self.version = None
+        self.logpath = None
+        self = Container._inspect(self)
+
+    def getId(self):
+        return self.id
+
+    def __str__(self):
+        if not self.name:
+            return self.id
+        return self.name
+
+    @staticmethod
+    def _field(cid, key):
+        errno, stdout = containerRuntime_g.field(cid, key)
+        if errno == 0 and re.match(r'\S', stdout):
+            return stdout.rstrip().strip('\"')      # Remove trailing whitespace and surrounding quotes if exists. e.g. "solace" -> solace
+        return ""
+
+    @staticmethod
+    def _inspect(self):
+        containerRuntimeStr = containerRuntime_g.getContainerRuntimeStr()
+
+        self.name = Container._field(self.id, 'Name').strip(r'\/\'')
+        # Recover code editor syntax highlight "
+        if not self.name:
+            redirector_g.log('ERROR', "Unable to parse {} inspect results for Container {}".format(containerRuntimeStr, self.id))
+            return self
+        redirector_g.log('INFO', "Found name {} for Container {} on {} runtime, using this for all output".format(self.name, self.id, containerRuntimeStr))
+
+        if containerRuntime_g.isRuntimeDocker():
+            if "json-file" in Container._field(self.id, 'HostConfig.LogConfig.Type'):
+                self.logpath = Container._field(self.id, 'LogPath')
+            else:
+                errorsWarnings_g.dockerLogDriverWarning = True
+        elif containerRuntime_g.isRuntimePodman():
+            if "k8s-file" in Container._field(self.id, 'HostConfig.LogConfig.Type'):
+                self.logpath = Container._field(self.id, 'HostConfig.LogConfig.Path')
+            else:
+                errorsWarnings_g.podmanLogDriverWarning = True
+        else:
+            redirector_g.log('ERROR', "Unknown container runtime '{}' for LogPath".format(containerRuntimeStr))
+
+        self.running = Container._field(self.id, 'State.Running')
+        if not self.running:
+            redirector_g.log('WARN', "Unable to determine state for Container {}".format(self.name))
+        else:
+            self.running = True if re.match('true', self.running, re.I) else False
+
+        TMP_FILE = '/tmp/manifest.txt'
+        errno, stdout = self.copyFile('/usr/sw/loads/currentload/manifest.txt', TMP_FILE)
+        try:
+            with open(TMP_FILE) as f:
+                for line in f:
+                    tmpMatch = re.search(r"version:(soltr_.*)", line.strip())
+                    if tmpMatch:
+                        self.version = tmpMatch.group(1)
+                        redirector_g.log('INFO', "Found version {} for Container {}".format(self.version, self.name))
+                        break
+        except Exception:
+            self.version = None
+
+        if self.version is None:
+            redirector_g.log('WARN', "Unable to determine version for Container {}".format(self.name))
+
+        try:
+            if os.path.islink(TMP_FILE) or os.path.isfile(TMP_FILE):
+                os.unlink(TMP_FILE)
+            else:
+                shutil.rmtree(TMP_FILE)
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to remove {} from staging area ({})".format(TMP_FILE, e), e.errno)
+
+        return self
+
+    def isRunning(self):
+        return self.running
+
+    def getVolumePath(self, volume):
+        if containerRuntime_g.usesPythonApi():
+            return ""
+        try:
+            storageVolume = SolaceStorageVolumes(volume)
+            return storageVolume.getSrcPath(self.id)
+        except:
+            return ""
+
+    def getLogPath(self):
+        return self.logpath
+
+    def getVersion(self):
+        return self.version
+
+    def copyFile(self, src, dest, Timeout=30):
+        return containerRuntime_g.cp(self.id, src, dest, Timeout)
+
+    def rmFile(self, file, Timeout=30):
+        cmd = [ "rm", "-rf", file ]
+        return containerRuntime_g.exc(self.id, cmd, Timeout, None)
+
+    def execCommand(self, cmd, Timeout=30, AllowErrno=None):
+        return containerRuntime_g.exc(self.id, cmd, Timeout, AllowErrno)
+
+    def runInUserNs(self, volPath):
+        if not containerRuntime_g.rootlessMode():
+            return False
+
+        ctrUser = Container._field(self.id, 'Config.User')
+
+        if ctrUser is None:
+           return False
+
+        ctrUser = ctrUser.split(":")[0]
+
+        # container user is the same as the host user, so no need to run commands in the user namespace
+        if not ctrUser.isnumeric() or int(ctrUser) == 0:
+            return False
+
+        prefixStr = containerRuntime_g.userNsExcPrefix()
+
+        if prefixStr is None:
+            redirector_g.log('DEBUG', "Unable to determine user namespace")
+            return False
+
+        cmdStr = prefixStr + ['stat', '-c', '%u', volPath]
+        errno, pathOwner = Cmd(cmdStr).run()
+
+        if errno or pathOwner is None:
+           redirector_g.log('DEBUG', "Unable to determine ownership of path {}".format(volPath))
+           return False
+
+        if not pathOwner.strip().isnumeric():
+            redirector_g.log('DEBUG', "Unexpected path owner format {}".format(pathOwner))
+            return False 
+
+        # path exists and is owned either by the host user or by this container's user
+        # (and not by another container running on the same host)
+        return (int(ctrUser) == int(pathOwner)) or (int(pathOwner) == 0)
+
+        
+# Storage volumes for Solace Container
+#
+class SolaceStorageVolumes:
+    destinationPaths = {
+        'jail'              : set(['/usr/sw/jail', '/var/lib/solace/jail']),
+        'var'               : set(['/usr/sw/var', '/var/lib/solace/var']),
+        'diagnostics'       : set(['/var/lib/solace/diags', '/var/lib/solace/diagnostics']),
+        'spool'             : set(['/usr/sw/internalSpool', '/var/lib/solace/internalSpool', '/var/lib/solace/spool']),
+        'spool-cache'       : set(['/usr/sw/internalSpool/softAdb', '/var/lib/solace/internalSpool/softAdb', '/var/lib/solace/spool-cache']),
+        'spool-cache-backup': set(['/usr/sw/adb', '/var/lib/solace/adb', '/var/lib/solace/spool-cache-backup']),
+        'config'            : set(['/var/lib/solace/config'])
+    }
+    destBasePath = '/var/lib/solace'
+
+    def __init__(self,
+                 volumeName):
+        self.volumeName = volumeName
+
+    @classmethod
+    def getVolumeNames(cls):
+        return list(cls.destinationPaths.keys())
+
+    @staticmethod
+    def getVolumeMountPoint(volume):
+        try:
+            if not containerRuntime_g.usesPythonApi():
+                errno, stdout = containerRuntime_g.inspect_vol(volume)
+                if errno == 0:
+                    res = json.loads(stdout)[0]
+                    if not res['Options']:
+                        return res['Mountpoint']
+                    elif 'mountpoint' in res['Options']:
+                        return res['Options']['mountpoint']
+                    elif 'device' in res['Options']:
+                        devicePath = res['Options']['device']
+                        if devicePath:
+                           cmdStr = ['stat', '-c', '%F', devicePath]
+                           errno, deviceType = Cmd(cmdStr).run()
+                           if errno or deviceType is None:
+                              redirector_g.log('DEBUG', "Unable to determine volume device type {}".format(devicePath))
+                              return res['Mountpoint']
+                           if deviceType.strip() == "directory":
+                              return res['Options']['device']
+                        return res['Mountpoint']
+        except:
+            pass
+
+        return ""
+
+    def getSrcPath(self, containerId):
+        possibleDestPaths = self.__class__.destinationPaths[self.volumeName]
+
+        # Check 'docker inspect' -> Mounts
+        errno, stdout = containerRuntime_g.field(containerId, 'Mounts')
+        if errno == 0:
+           mounts = json.loads(stdout)
+
+           # Find the mount info for the storage element
+           isBasePath = False
+           mnt = None
+           for mount in mounts:
+             dest = mount.get('Destination', '')
+             if dest == self.__class__.destBasePath:
+                isBasePath = True
+                mnt = mount
+             elif dest in possibleDestPaths:
+                isBasePath = False
+                mnt = mount
+                break
+
+           srcPath = ""
+           mntName = ""
+           if mnt:
+              srcPath = mnt['Source']
+              mntName = mnt.get('Name', '')
+           # To retain simplicity, assume that this is a 
+           # volume mount if Name field exists. 
+           # Alternative is to include a check for mount type.
+           if mntName:
+             mntPoint = SolaceStorageVolumes.getVolumeMountPoint(mntName)
+             if mntPoint:
+                srcPath = mntPoint 
+
+           if isBasePath:
+             srcPath = os.path.join(srcPath, self.volumeName)
+
+           if srcPath:
+             return srcPath
+
+        # should not get here; however if for whatever reason we were unable
+        # to retrieve Mounts by running inspect on the container, this
+        # logic will be used as the fallback
+        # If storage-group exists, check to see if volume exists within storage-group
+        res = SolaceStorageVolumes.getVolumeMountPoint('storage-group')
+        if res:
+            volumeSrcPath = os.path.join(res, self.volumeName)
+            if os.path.isdir(volumeSrcPath) and os.listdir(volumeSrcPath):
+                return volumeSrcPath
+
+        return ""
+
+# Diagnostic files to capture from the Host
+#
+class HostFile:
+    def __init__(self,
+                 pattern,
+                 SkipDateCheck=False,
+                 ErrorOnMissing=False,
+                 DontKeepOldFiles=False,
+                 SizeLimit=None,
+                 RemoveOnCapture=False):
+        self.pattern = pattern
+        self.basename = os.path.basename(pattern)
+        self.dirname = os.path.dirname(pattern)
+        self.skipdate = SkipDateCheck
+        self.allowmissing = not ErrorOnMissing
+        self.dontkeep = DontKeepOldFiles
+        self.sizelimit = SizeLimit
+        self.removeoncapture = RemoveOnCapture
+
+    @staticmethod
+    def chmod(tarinfo, perm=0o766):
+        tarinfo.mode=perm
+        return tarinfo
+
+    def add(self, stagingArea, days, FileSub=None, ManifestPrefix=None, userNsExc=False):
+
+        if sidecarMode_g:
+            redirector_g.log('DEBUG', "Skipping host files matching pattern '{}' in sidecar mode".format(self.pattern))
+            return
+
+        if userNsExc == True:
+           self.addFromUserNs(stagingArea, days, FileSub, ManifestPrefix)
+           return
+
+        umask = os.umask(0)
+        now = time.time()
+        processed = 0
+
+        if not os.path.isdir(self.dirname):
+            level = 'DEBUG' if self.allowmissing else 'ERROR'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(self.pattern))
+            return
+
+        try:
+            files = [os.path.join(self.dirname, f) for f in os.listdir(self.dirname) if re.match("^{}$".format(self.basename), f)]
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to add files matching pattern '{}' ({})".format(self.pattern, e), e.errno)
+            return
+
+        if not files:
+            level = 'DEBUG' if self.allowmissing else 'ERROR'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(self.pattern))
+            return
+
+        files = reversed(sorted(files, key=os.path.getmtime))
+        for file in files:
+
+            if days is not None and not self.skipdate and os.path.getmtime(file) < now - days * 86400 and (processed > 0 or (processed == 0 and self.dontkeep)):
+                redirector_g.log('DEBUG', "{} is too old, skipping remaining files".format(file))
+                break
+
+            if self.sizelimit is not None and processed > self.sizelimit:
+                redirector_g.log('DEBUG', "Size limit for pattern {} reached, skipping remaining files".format(self.pattern))
+                break
+
+            name = re.sub(FileSub['regex'], FileSub['sub'], file) if FileSub else file
+            mfst = "{}:{}".format(ManifestPrefix, file) if ManifestPrefix else file
+            if stagingArea.add(file, filter=HostFile.chmod, arcname=name):
+                redirector_g.manifest(mfst)
+                if self.removeoncapture:
+                    filesToBeRemoved_g.add(file)
+
+            processed += os.path.getsize(file)
+
+    def addFromUserNs(self, stagingArea, days, FileSub, ManifestPrefix):
+
+        umask = os.umask(0)
+        now = time.time()
+        processed = 0
+
+        prefixStr = containerRuntime_g.userNsExcPrefix()
+
+        # check if directory exists
+        try:
+           subprocess.check_output(prefixStr + ["ls", "-d", self.dirname], stderr=subprocess.STDOUT, encoding='utf-8')
+        except subprocess.CalledProcessError as e:
+           level = 'DEBUG' if self.allowmissing else 'ERROR'
+           redirector_g.log(level, "Unable to access path '{}' ({})".format(self.pattern, e.output))
+           return
+        except Exception as e:
+           level = 'DEBUG' if self.allowmissing else 'ERROR'
+           redirector_g.log(level, "Unable to access path '{}' ({})".format(self.pattern, e))
+           return
+
+        # get list of files in path sorted by file modification time
+        files = []
+        try:
+           allFiles = subprocess.check_output(prefixStr + ["ls", "-Act", self.dirname],  stderr=subprocess.DEVNULL, encoding='utf-8').split()
+        except Exception as e:
+           redirector_g.log('ERROR', "Unable to list files in path '{}' ({})".format(self.dirname, e))
+           return
+
+        try:
+           for f in allFiles:
+              if re.match("^{}$".format(self.basename), f):
+                 file = os.path.join(self.dirname, f)
+                 modTime = subprocess.check_output(prefixStr + ["stat", "-c", "%Y", file],  stderr=subprocess.DEVNULL, encoding='utf-8')
+                 if days is not None and not self.skipdate and int(modTime) < now - days * 86400 and (processed > 0 or (processed == 0 and self.dontkeep)):
+                     redirector_g.log('DEBUG', "{} is too old, skipping remaining files".format(file))
+                     break
+
+                 if self.sizelimit is not None and processed > self.sizelimit:
+                     redirector_g.log('DEBUG', "Size limit for pattern {} reached, skipping remaining files".format(self.pattern))
+                     break
+
+                 files.append(file)
+                 fileSize = subprocess.check_output(prefixStr + ["stat", "-c", "%s", file],  stderr=subprocess.DEVNULL, encoding='utf-8')
+                 processed += int(fileSize)
+        except Exception as e:
+           redirector_g.log('ERROR', "Unable to add files matching pattern '{}' ({})".format(self.pattern, e))
+           return
+
+        if not files:
+            level = 'DEBUG' if self.allowmissing else 'ERROR'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(self.pattern))
+            return
+
+        path = os.path.join(stagingArea.getPath(), "container_host", self.dirname.lstrip('/'))
+
+        if debugMode_g:
+            redirector_g.log('MSG', "Skipping copy of files from {} to staging area path {}, debug mode enabled".format(self.dirname, path))
+            return
+
+        redirector_g.log('INFO', "Attempting copy of files from {} to staging area path {}".format(self.dirname, path))
+
+        if not os.path.exists(path):
+           try:
+             os.makedirs(path)
+           except OSError as e:
+             if e.errno == errno.EEXIST and os.path.isdir(path):
+                pass
+             else:
+                redirector_g.log('ERROR', "Unable to create staging area dir {}".format(path))
+                return
+
+        for file in files:
+          try:
+            subprocess.check_output(prefixStr + ["cp", "-R", "--preserve=timestamps", file, path], stderr=subprocess.DEVNULL, encoding='utf-8')
+          except Exception as e:
+            redirector_g.log('ERROR', "Unable to copy file to staging area '{}'".format(path))
+            return
+
+          basePath, fileName = os.path.split(file)
+          stagingPath = os.path.join(path, fileName)
+          if not os.path.exists(stagingPath):
+             redirector_g.log('ERROR', "Failed to copy file to staging area '{}'".format(stagingPath))
+             return
+          name = re.sub(FileSub['regex'], FileSub['sub'], file) if FileSub else file
+          mfst = "{}:{}".format(ManifestPrefix, file) if ManifestPrefix else file
+
+          if stagingArea.add(stagingPath, filter=HostFile.chmod, arcname=name):
+             redirector_g.manifest(mfst)
+             if self.removeoncapture:
+                filesToBeRemoved_g.add(file, isContainerFile=False, containerId=None, userNsExc=True)
+
+
+# Files generated local to a sidecar container (captured as if they were from the host)
+#
+class SidecarFile:
+    def __init__(self, path, ErrorOnMissing=True, ArcName=None):
+        self.path = path
+        self.allowmissing = not ErrorOnMissing
+        self.arcname = ArcName if ArcName else path
+
+    def add(self, stagingArea):
+        if not os.path.exists(self.path):
+            level = 'DEBUG' if self.allowmissing else 'ERROR'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(self.path))
+            return
+
+        if stagingArea.add(self.path, arcname=self.arcname):
+            redirector_g.manifest("sidecar:{}".format(self.arcname))
+
+
+# Diagnostic files to capture from host volumes for a Container
+#
+class PersistentFile:
+    def __init__(self, name, containerPath, pattern, SkipDateCheck=False,
+                 ErrorOnMissing=False, DontKeepOldFiles=False,
+                 SizeLimit=None, RemoveOnCapture=False):
+        self.name = name
+        self.containerPath = containerPath
+        self.pattern = pattern
+        self.skipdate = SkipDateCheck
+        self.erroronmissing = ErrorOnMissing
+        self.dontkeep = DontKeepOldFiles
+        self.sizelimit = SizeLimit
+        self.removeoncapture = RemoveOnCapture
+
+    def _fromVolume(self, container, stagingArea, days):
+        path = container.getVolumePath(self.name)
+        if not path:
+            level = 'ERROR' if self.erroronmissing else 'DEBUG'
+            redirector_g.log(level, "Unable to find Host path for container {} path {}".format(container, self.containerPath))
+            return
+        redirector_g.log('DEBUG', "Found Host path {} for container {} path {}".format(path, container, self.containerPath))
+
+        pattern = os.path.join(path, self.pattern)
+        if container.getVersion():
+            pattern = re.sub('__SOL_VERSION__', container.getVersion(), pattern)
+        sub = { 'regex' : "{}/*".format(path), 'sub' : "container_{}{}/".format(container, self.containerPath) }
+        HostFile(pattern,
+                  SkipDateCheck=self.skipdate,
+                  ErrorOnMissing=self.erroronmissing,
+                  DontKeepOldFiles=self.dontkeep,
+                  SizeLimit=self.sizelimit,
+                  RemoveOnCapture=self.removeoncapture)\
+                 .add(stagingArea,
+                      days,
+                      FileSub=sub,
+                      ManifestPrefix="{}:{}".format(self.containerPath, container),
+                      userNsExc=container.runInUserNs(path))
+
+    def _fromSidecar(self, container, stagingArea, days):
+        pattern = os.path.join(self.containerPath, self.pattern)
+        if container.getVersion():
+            pattern = re.sub('__SOL_VERSION__', container.getVersion(), pattern)
+        dirname = os.path.dirname(pattern)
+        basename = os.path.basename(pattern)
+
+        umask = os.umask(0)
+        now = time.time()
+        processed = 0
+
+        if not os.path.isdir(dirname):
+            level = 'ERROR' if self.erroronmissing else 'DEBUG'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(pattern))
+            return
+
+        try:
+            files = [os.path.join(dirname, f) for f in os.listdir(dirname) if re.match("^{}$".format(basename), f)]
+        except Exception as e:
+            redirector_g.logp('ERROR', "Unable to add files matching pattern '{}' ({})".format(pattern, e), e.errno)
+            return
+
+        if not files:
+            level = 'ERROR' if self.erroronmissing else 'DEBUG'
+            redirector_g.log(level, "No files found matching pattern '{}'".format(pattern))
+            return
+
+        files = reversed(sorted(files, key=os.path.getmtime))
+        for file in files:
+
+            if days is not None and not self.skipdate and os.path.getmtime(file) < now - days * 86400 and (processed > 0 or (processed == 0 and self.dontkeep)):
+                redirector_g.log('DEBUG', "{} is too old, skipping remaining files".format(file))
+                break
+
+            if self.sizelimit is not None and processed > self.sizelimit:
+                redirector_g.log('DEBUG', "Size limit for pattern {} reached, skipping remaining files".format(pattern))
+                break
+
+            if stagingArea.add(file, filter=HostFile.chmod, arcname="container_{}{}".format(container, file)):
+                redirector_g.manifest("sidecar_persistent_file:{}:{}".format(container, file))
+                if self.removeoncapture:
+                    filesToBeRemoved_g.add(file, True, container.getId())
+
+            processed += os.path.getsize(file)
+
+    def add(self, container, stagingArea, days):
+        if sidecarMode_g:
+            return self._fromSidecar(container, stagingArea, days)
+        else:
+            return self._fromVolume(container, stagingArea, days)
+
+# Diagnostic files to capture from the Container
+#
+class ContainerFile:
+    def __init__(self,
+                 path,
+                 Timeout=30,
+                 SkipDateCheck=False,
+                 ErrorOnMissing=False,
+                 RemoveOnCapture=False):
+        self.path = path
+        self.basename = os.path.basename(path)
+        self.skipdate = SkipDateCheck
+        self.allowmissing = not ErrorOnMissing
+        self.timeout = Timeout
+        self.removeoncapture = RemoveOnCapture
+
+    @staticmethod
+    def chmod(tarinfo, perm=0o766):
+        tarinfo.mode=perm
+        return tarinfo
+
+    def add(self, container, stagingArea, days):
+        umask = os.umask(0)
+        now = time.time()
+
+        redirector_g.log('INFO', "Attempting copy of file {} from Container {}".format(self.path, container))
+        path = os.path.join(stagingArea.getPath(), "container_{}".format(container), os.path.dirname(self.path).lstrip('/'))
+
+        if debugMode_g:
+            redirector_g.log('DEBUG', "Skipping copy of {}:{} to {}, debug mode enabled".format(container, self.path, path))
+            return
+
+        try:
+            os.makedirs(path)
+        except OSError as e:
+            if e.errno == errno.EEXIST and os.path.isdir(path):
+                pass
+            else:
+                redirector_g.log('ERROR', "Unable to create staging area for Container {}".format(container))
+                return
+
+        path = os.path.join(path, self.basename)
+        rc, stdout = container.copyFile(self.path, path, Timeout=self.timeout)
+        if rc == 0:
+            if days is not None and not self.skipdate and os.path.getmtime(path) < now - days * 86400:
+                redirector_g.log('DEBUG', "{} is too old, skipping file".format(self.path))
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.unlink(path)
+                except Exception as e:
+                    redirector_g.logp('ERROR', "Unable to remove {} from staging area ({})".format(path, e), e.errno)
+                return
+            redirector_g.log('INFO', "Copied {} to {}".format(self.path, path))
+            if stagingArea.add(path, arcname=os.path.join("container_{}".format(container), self.path.lstrip('/'))):
+                redirector_g.manifest("{}:{}".format(container, self.path))
+                if self.removeoncapture:
+                    filesToBeRemoved_g.add(self.path, True, container.getId())
+        else:
+            level = 'DEBUG' if self.allowmissing else 'ERROR'
+            redirector_g.log(level, "Cannot copy file {} from Container {} (errno {} : {})".format(self.path, container, rc, stdout))
+            return
+
+# Internal command base class
+#
+class Cmd:
+    def __init__(self, cmd, Timeout=30, AllowErrno=None, Stdout=subprocess.PIPE, Stderr=subprocess.STDOUT):
+        self.cmd = cmd
+        self.timeout = Timeout
+        self.allow = AllowErrno
+        self.stdout = Stdout
+        self.stderr = Stderr
+
+    def __repr__(self):
+        return " ".join(self.cmd)
+
+    class _TimeoutException(Exception):
+        pass
+
+    def run(self):
+        def _timeout(sig, frm):
+            redirector_g.log('ERROR', "Command '{}' timeout, forced termination after {} seconds".format(self, self.timeout))
+            raise Cmd._TimeoutException
+        signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(self.timeout)
+        try:
+            p = subprocess.Popen(self.cmd, stdout=self.stdout, stderr=self.stderr)
+            stdout, stderr = p.communicate()
+            signal.alarm(0)
+            if (self.allow is not None and p.returncode in self.allow):
+                p.returncode = 0
+            return (p.returncode, stdout.decode('utf-8', 'ignore') if stdout else "")
+        except OSError as e:
+            signal.alarm(0)
+            return (e.errno, None)
+        except Cmd._TimeoutException:
+            return (errno.ETIMEDOUT, None)
+
+# Diagnostic commands to be executed on the Host, output is captured
+# in the diagnostics manifest file
+#
+class HostCmd:
+    _BANNER_FMT = "\n\n" + '#'*48 + "\n# {}\n" + '#'*48 + "\n"
+
+    def __init__(self, cmd, Prerequisite=None, Timeout=30, AllowErrno=None, Sidecar=False):
+        self.cmd = Cmd(cmd, Timeout, AllowErrno)
+        self.prereq = None
+        if Prerequisite is not None:
+            self.prereq = Cmd(Prerequisite, Timeout)
+        self.sidecar = Sidecar
+
+    def __str__(self):
+        return repr(self.cmd)
+
+    @staticmethod
+    def banner(cmd):
+        redirector_g.diag(HostCmd._BANNER_FMT.format(cmd))
+
+    @staticmethod
+    def output(cmd, rc, output):
+        if rc:
+            try:
+                redirector_g.logp('INFO', "Command '{}' failed (rc = {})".format(cmd, errno.errorcode[rc]), rc)
+                redirector_g.diag("Command failed (rc = {})".format(errno.errorcode[rc]))
+            except KeyError as e:
+                redirector_g.logp('INFO', "Command '{}' failed (rc = {})".format(cmd, rc), rc)
+                redirector_g.diag("Command failed (rc = {})".format(rc))
+        else:
+            redirector_g.diag(output)
+
+    @staticmethod
+    def entry(cmd, rc, output):
+        redirector_g.log('DEBUG', "Running command '{}'".format(cmd))
+        HostCmd.banner(cmd)
+        HostCmd.output(cmd, rc, output)
+
+    def run(self):
+
+        if sidecarMode_g and not self.sidecar:
+            redirector_g.log('DEBUG', "Skipping host command '{}' in sidecar mode".format(self.cmd))
+            return
+
+        redirector_g.log('DEBUG', "Running command '{}'".format(self.cmd))
+        if not debugMode_g:
+            HostCmd.banner(self.cmd)
+
+            if self.prereq is not None:
+                rc, stdout = self.prereq.run()
+                if rc:
+                    redirector_g.log('DEBUG', "Skipping command '{}' prerequisite '{}' not met".format(self.cmd, self.prereq))
+                    redirector_g.diag("Skipping command prerequisite '{}' not met".format(self.prereq))
+                    return
+
+            rc, stdout = self.cmd.run()
+            HostCmd.output(self.cmd, rc, stdout)
+
+# Diagnostic commands to be executed in the Container, output is captured
+# in the diagnostics manifest file
+#
+class ContainerCmd:
+    _BANNER_FMT = "\n\n" + '#'*48 + "\n# Container {} :: {}\n" + '#'*48 + "\n"
+
+    def __init__(self, cmd, Prerequisite=None, Timeout=30, AllowErrno=None):
+        self.cmd = cmd
+        self.prereq = Prerequisite
+        self.timeout = Timeout
+        self.allow = AllowErrno
+
+    def __repr__(self):
+        return " ".join(self.cmd)
+
+    def run(self, container):
+        redirector_g.log('DEBUG', "Running command in Container {} '{}'".format(container, self))
+
+        if not debugMode_g:
+            redirector_g.diag(ContainerCmd._BANNER_FMT.format(container, self))
+
+            if self.prereq:
+                rc, stdout = container.execCommand(self.prereq, Timeout=self.timeout)
+                if rc != 0:
+                    s = " ".join(self.prereq)
+                    redirector_g.log('DEBUG', "Skipping command in Container {} '{}' prerequisite '{}' not met".format(container, self.cmd, s))
+                    redirector_g.diag("Skipping command prerequisite '{}' not met".format(s))
+                    return
+
+            rc, stdout = container.execCommand(self.cmd, Timeout=self.timeout, AllowErrno=self.allow)
+            if rc:
+                s = " ".join(self.cmd)
+                try:
+                    redirector_g.logp('ERROR', "Container command '{}' failed (rc = {})".format(self.cmd, errno.errorcode[rc]), rc)
+                    redirector_g.diag("Command failed (rc = {})".format(errno.errorcode[rc]))
+                except KeyError as e:
+                    redirector_g.logp('ERROR', "Container command '{}' failed (rc = {})".format(self.cmd, rc), rc)
+                    redirector_g.diag("Command failed (rc = {})".format(rc))
+            else:
+                redirector_g.diag(stdout)
+
+# Gather diagnostic information
+#
+def gather(args):
+
+    # Create the staging area
+    #
+    stagingArea = StagingArea(args.file, args.days)
+
+    # Setup a method specific signal handlers
+    #
+    def _handle(signal, frame):
+        print("")
+        redirector_g.log('ERROR', "Recieved signal {}, aborting operation, All data collected thusfar will be committed".format(signal))
+        stagingArea.commit()
+        stagingArea.cleanup()
+        sys.exit(128 + signal)
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGHUP, _handle)
+    signal.signal(signal.SIGQUIT, _handle)
+    signal.signal(signal.SIGTRAP, _handle)
+    signal.signal(signal.SIGTSTP, _handle)
+
+    # The container runtime string (e.g. "docker" or "podman"), used throughout
+    #
+    containerRuntimeStr = containerRuntime_g.getContainerRuntimeStr()
+
+    # Copy Host files to the staging area
+    #
+    redirector_g.log('MSG', "\nStarting to copy files from Host...")
+    for file in HOST_FILES:
+        file.add(stagingArea, args.days)
+    redirector_g.log('MSG', "Finished copying files from Host")
+
+    # Run Host diagnostic commands
+    #
+    redirector_g.log('MSG', "\nStarting to run commands on Host...")
+    for cmd in HOST_CMDS:
+        cmd.run()
+    redirector_g.log('MSG', "Finished running commands on Host")
+
+    # Run Container Runtime diagnostic commands
+    #
+    redirector_g.log('MSG', "\nStarting to run Container Runtime commands using driver '{}'...".format(containerRuntime_g))
+    HostCmd.entry('{} version'.format(containerRuntimeStr), *containerRuntime_g.version())
+    HostCmd.entry('{} info'.format(containerRuntimeStr), *containerRuntime_g.info())
+    HostCmd.entry('{} ps --all'.format(containerRuntimeStr), *containerRuntime_g.ps(All=True))
+    HostCmd.entry('{} images --all'.format(containerRuntimeStr), *containerRuntime_g.images(All=True))
+    HostCmd.entry('{} stats --all --no-stream --no-trunc'.format(containerRuntimeStr), *containerRuntime_g.stats(All=True, NoStream=True, NoTrunc=True))
+    redirector_g.log('MSG', "Finished running Container Runtime commands")
+
+    # Try and gather core files, if based on core pattern rules, note that for
+    # pipes, it assumes that the core files are placed in the volume which is
+    # mounted at DIAGS_DIR, which are already covered in PERSISTENT_FILES
+    #
+    redirector_g.log('MSG', "\nInspecting kernel core parameters...")
+    fmt = args.core_host_path
+    if not fmt:
+        errno, fmt = Cmd(['cat', '/proc/sys/kernel/core_pattern']).run()
+        if errno:
+            fmt = None
+            redirector_g.log('ERROR', "Unable to read kernel core pattern ({})".format(errno))
+
+    if fmt:
+        fmt = fmt.strip()
+        if re.match(r'/', fmt):
+            if re.search(r'%.*/', fmt):
+                redirector_g.log('WARN',
+                                 "Unable to gather core files matching "
+                                 "kernel core_pattern '{}' due to embedded "
+                                 "variables".format(fmt))
+            elif args.core_host_path:
+                fmt = re.sub(r'^([\w/]*)$', r"\g<1>.*", fmt)
+                redirector_g.log('INFO', "Gathering core files matching kernel core_pattern '{}' from host".format(fmt))
+                HostFile(fmt, SizeLimit=6000000000, DontKeepOldFiles=True).add(stagingArea, args.days)
+            else:
+                redirector_g.log('WARN',
+                                 "Script does not support gathering "
+                                 "core files matching kernel core_pattern "
+                                 "'{}' absolute path. Script will make "
+                                 "a best effort attempt".format(fmt))
+                errno, usepid = Cmd(['cat', '/proc/sys/kernel/core_uses_pid']).run()
+                if re.search('[.]%p$', fmt) or (errno == 0 and '1' in usepid):
+                    fmt = re.sub('[.]%p$', '', fmt)
+                    redirector_g.log('INFO', "Gathering core files matching kernel core_pattern '{}' with PID extension from container".format(fmt))
+                    redirector_g.log('WARN', "Core pattern '{}' is relative, requiring PID iteration, copying files from container may take several minutes".format(fmt))
+                    for pid in range(1, 1024):
+                        CONTAINER_FILES.append(
+                            ContainerFile("{}.{}".format(fmt, pid),
+                                            SkipDateCheck=True,
+                                            Timeout=120,
+                                            RemoveOnCapture=True))
+                else:
+                    redirector_g.log('INFO', "Gathering core files matching kernel core_pattern '{}' from container".format(fmt))
+                    CONTAINER_FILES.append(
+                        ContainerFile("{}".format(fmt),
+                                      SkipDateCheck=True,
+                                      Timeout=120,
+                                      RemoveOnCapture=True))
+        elif re.match(r'\w', fmt):
+            if re.search('%[^p]', fmt) or re.search('%p.+$', fmt):
+                redirector_g.log('WARN', "Unable to gather core files matching kernel core_pattern '{}' due to wildcards".format(fmt))
+            else:
+                errno, usepid = Cmd(['cat', '/proc/sys/kernel/core_uses_pid']).run()
+                if re.search('[.]%p$', fmt) or (errno == 0 and re.search('[1-9]', usepid)):
+                    fmt = re.sub('[.]%p$', '', fmt)
+                    redirector_g.log('INFO', "Gathering core files matching kernel core_pattern '{}' with PID extension from container at /usr/sw".format(fmt))
+                    redirector_g.log('WARN', "Core pattern '{}' is relative, requiring PID iteration, copying files from container may take several minutes".format(fmt))
+                    for pid in range(1, 1024):
+                        CONTAINER_FILES.append(
+                            ContainerFile("/usr/sw/{}.{}".format(fmt, pid),
+                                          SkipDateCheck=True,
+                                          Timeout=120,
+                                          RemoveOnCapture=True))
+                else:
+                    redirector_g.log('INFO', "Gathering core files matching kernel core_pattern '{}' from container at /usr/sw".format(fmt))
+                    CONTAINER_FILES.append(
+                        ContainerFile("/usr/sw/{}".format(fmt),
+                                      SkipDateCheck=True,
+                                      Timeout=120,
+                                      RemoveOnCapture=True))
+        elif re.match(r'|', fmt):
+            redirector_g.log('INFO', "Pipe found in kernel core pattern '{}', core files will be collected from {}, if this location has been bind-mounted (volume was used)".format(fmt, DIAGS_DIR))
+    redirector_g.log('MSG', "Finished inspecting kernel core parameters")
+
+    # Determine which Containers should be queried
+    #
+    ids = []
+    if args.name is not None:
+        redirector_g.log('DEBUG', "Searching for Container with name or id {}".format(args.name))
+        errno, stdout = containerRuntime_g.field(args.name, 'Id')
+        if errno == 0:
+            id = re.sub("['\"]", '', stdout.strip())
+            redirector_g.log('INFO', "Found Container {} for name or id {}".format(id, args.name))
+            ids.append(id)
+        else:
+            redirector_g.log('WARN', "No Container found with name or id {}".format(args.name))
+
+    if not ids and args.image is not None:
+        redirector_g.log('DEBUG', "Searching for Containers created from image {}".format(args.image))
+        errno, stdout = containerRuntime_g.find(args.image, All=True)
+        if errno == 0:
+            for id in stdout.strip().split():
+                errno, stdout = containerRuntime_g.field(id, 'Id')
+                if errno == 0:
+                    id = re.sub("['\"]", '', stdout.strip())
+                    redirector_g.log('INFO', "Found Container {} created from image {}".format(id, args.image))
+                    ids.append(id)
+
+    if not ids:
+        errno, stdout = containerRuntime_g.ps(quiet=True, All=True)
+        if errno == 0:
+            if containerRuntime_g.usesPythonApi():
+                for idx, list_id in enumerate(stdout):
+                    stdout[idx] = list(list_id.values())[0]
+            else:
+                stdout = stdout.strip().split()
+
+            for id in stdout:
+                redirector_g.log('DEBUG', "Found Containers {}".format(id))
+                errno, stdout_imgtag = containerRuntime_g.field(id, 'Config.Image')
+                if errno != 0 or stdout_imgtag is None:
+                    continue
+                stdout_imgtag =stdout_imgtag.strip(' "')
+                stdout_img =stdout_imgtag.rpartition('/')[2]
+                if not stdout_img:
+                    continue
+                stdout_imgrepo =stdout_img.partition(':')[0]
+                repositories = [ 'solace-pubsub-enterprise', 'solace-pubsub-evaluation', 'solace-pubsub-standard', 'solace-app', 'solace' ]
+                if stdout_imgrepo:
+                    for repository in repositories:
+                        redirector_g.log('DEBUG', "Checking if Container {} was created from repository {}".format(id,repository))
+                        if stdout_imgrepo == repository:
+                            redirector_g.log('INFO', "Found Container {} created from repository {}".format(id, repository.strip(':')))
+                            ids.append(id)
+                            break
+
+            # if no containers created from the known repositories are found, look for repository names that have the substring 'solace' 
+            if not ids:
+                for id in stdout:
+                    redirector_g.log('DEBUG', "Found Container {}".format(id))
+                    errno, stdout_imgtag = containerRuntime_g.field(id, 'Config.Image')
+                    if errno != 0 or stdout_imgtag is None:
+                       continue
+                    stdout_imgtag =stdout_imgtag.strip(' "')
+                    stdout_img =stdout_imgtag.rpartition('/')[2]
+                    if not stdout_img:
+                       continue
+                    stdout_imgrepo =stdout_img.partition(':')[0]
+                    if stdout_imgrepo:
+                        if 'solace' in stdout_imgrepo:
+                            redirector_g.log('INFO', "Found Container {} created from repository {}".format(id, stdout_img))
+                            ids.append(id)
+
+    if not ids:
+        NAME = 'solace'
+        redirector_g.log('DEBUG', "Searching for Containers with name {}".format(NAME))
+        errno, stdout = containerRuntime_g.field(NAME, 'Id')
+        if errno == 0:
+            id = re.sub("['\"]", '', stdout.strip())
+            redirector_g.log('INFO', "Found Container {} for name {}".format(id, NAME))
+            ids.append(id)
+        else:
+            redirector_g.log('DEBUG', "No Container found with name {}".format(NAME))
+
+    # Run queries for all Containers
+    #
+    if not ids:
+        redirector_g.log('WARN', "No Containers found, skipping Container commands")
+    else:
+        for id in ids:
+
+            # Create the Container object
+            #
+            container = Container(id)
+
+            HostCmd.entry("{} inspect {}".format(containerRuntimeStr, id), *containerRuntime_g.inspect(id))
+            HostCmd.entry("{} logs --timestamps {}".format(containerRuntimeStr, id), *containerRuntime_g.logs(id, Timestamps=True))
+            HostCmd.entry("{} diff {}".format(containerRuntimeStr, id), *containerRuntime_g.diff(id))
+
+            ephemeralStorage = list()
+            volumes = SolaceStorageVolumes.getVolumeNames()
+            for volume in volumes:
+                volumePath = container.getVolumePath(volume)
+                if not container.runInUserNs(volumePath):
+                   HostCmd(["ls", "-Zal", volumePath]).run()
+                else:
+                   prefixStr = containerRuntime_g.userNsExcPrefix()
+                   HostCmd(prefixStr + ["ls", "-Zal", volumePath]).run()
+                if volumePath == "":
+                   ephemeralStorage.append(volume)
+
+            if not sidecarMode_g:
+                HostCmd([containerRuntimeStr, "run", "-it", "--rm", "--user=0", Container._field(id, 'Config.Image'), "cat", "/sys/fs/cgroup/cgroup.controllers"], AllowErrno=[0,1]).run()
+
+            if not sidecarMode_g and container.getLogPath():
+                HostFile(container.getLogPath()).add(stagingArea, args.days)
+
+            # Gather files from the container if the storage volume does not exist.
+            # Note: Pattern matching is omitted when copying files from the container -
+            # this logic uses a simplistic/best effort translation of the peristent
+            # file path to the container file path.
+            ephemeralFileSet = set()
+            for file in reversed(PERSISTENT_FILES):
+                if file.name in ephemeralStorage:
+                   if os.path.join(file.containerPath, '') in ephemeralFileSet:
+                       # parent directory already marked for collection
+                       continue
+                   ctrSubPath = os.path.dirname(file.pattern)
+                   if container.getVersion():
+                      ctrSubPath = re.sub('__SOL_VERSION__', container.getVersion(), ctrSubPath)
+                   ctrPath = os.path.join(file.containerPath, ctrSubPath)
+                   if ctrPath in ephemeralFileSet:
+                       continue
+                   ephemeralFileSet.add(ctrPath)
+                   ctrFile = ContainerFile(ctrPath, SkipDateCheck=True)  
+                   CONTAINER_FILES.append(ctrFile)
+
+            # Copy Container files to the staging area
+            #
+            redirector_g.log('MSG', "\nStarting to copy files from Container...")
+            for file in CONTAINER_FILES:
+                file.add(container, stagingArea, args.days)
+            redirector_g.log('MSG', "Finished copying files from Container")
+
+            # Copy Container persistent data to the staging area
+            #
+            redirector_g.log('MSG', "\nStarting to copy persistent data from Container...")
+            for file in PERSISTENT_FILES:
+                file.add(container, stagingArea, args.days)
+            redirector_g.log('MSG', "Finished copying persistent data from Container")
+
+            # Check to see if the Container is running, if it is, run the
+            # Container diagnostic commands
+            #
+            if not args.no_container:
+                if container.isRunning():
+                    redirector_g.log('MSG', "\nContainer {} running, starting to run commands in Container...".format(container))
+                    for cmd in CONTAINER_CMDS:
+                        cmd.run(container)
+                    redirector_g.log('MSG', "Finished running commands in Container {}".format(container))
+                else:
+                    redirector_g.log('WARN', "Unable to run commands in Container {} (not running)".format(container))
+                    host_diagnostics_path = ""
+                    try:
+                        error, stdout = containerRuntime_g.field(id, 'Mounts')
+                        mounts = json.loads(stdout)
+                        for mount in mounts:
+                            if mount['Destination'] == DIAGS_DIR:
+                                host_diagnostics_path = mount['Source']
+                                break
+                        if host_diagnostics_path != "":
+                            redirector_g.log('MSG', "\nStarting to list core files information in Container {}".format(container))
+                            HostCmd(["ls", "-alr", host_diagnostics_path]).run()
+                            redirector_g.log('MSG', "Finished listing core files information in Container {}".format(container))
+                    except:
+                        pass
+
+    # Write the manifest files
+    #
+    redirector_g.writeFiles(stagingArea)
+
+    # Create the tarball and cleanup the staging area
+    #
+    stagingArea.commit()
+    stagingArea.cleanup()
+
+    return 0
+
+# Host diagnostic files to capture
+#
+# The following fields are supported:
+#     ErrorOnMissing     : report an error if no files are found
+#     DontKeepOldFiles   : do not capture the one newest file matching the pattern if none have been modified within the capture time
+#     SkipDateCheck      : capture files matching the pattern regardless of last modified date
+#     SizeLimit          : maximum total size of all files captured matching the pattern, in bytes
+#
+# Note, no files are captured in sidecar mode
+#
+HOST_FILES = [
+    HostFile('/boot/grub2/grub.cfg', SkipDateCheck=True),
+    HostFile('/etc/resolv.conf', SkipDateCheck=True),
+    HostFile('/etc/solace/.+', SkipDateCheck=True),
+    HostFile('/etc/solace-release', SkipDateCheck=True),
+    HostFile('/etc/sysconfig/network', SkipDateCheck=True),
+    HostFile('/usr/lib/solace/solace-container-exec.+', SkipDateCheck=True),
+    HostFile('/var/crash/.+', DontKeepOldFiles=True, SizeLimit=3000000000),
+    HostFile('/var/lib/cloud/data/result.*', SkipDateCheck=True),
+    HostFile('/var/lib/cloud/data/status.*', SkipDateCheck=True),
+    HostFile('/var/log/apt/.+'),
+    HostFile('/var/log/audit/.+'),
+    HostFile('/var/log/chrony/.+'),
+    HostFile('/var/log/cloud-init.+', SkipDateCheck=True),
+    HostFile('/var/log/command.+'),
+    HostFile('/var/log/debug.*'),
+    HostFile('/var/log/lxd/.+'),
+    HostFile('/var/log/kern.log.*'),
+    HostFile('/var/log/messages.*'),
+    HostFile('/var/log/secure.*'),
+    HostFile('/var/log/solace-upgrade.*'),
+    HostFile('/var/log/syslog.*'),
+    HostFile('/var/log/tuned/.+'),
+    HostFile('/var/log/vmtoolsd.*'),
+    HostFile('/var/log/wtmp.*'),
+    HostFile('/var/log/yum.*'),
+    HostFile('/var/log/secure*'),
+    HostFile('/var/log/dnf.*'),
+]
+
+# Diagnostic commands to run on the Host
+#
+# The following fields are supported:
+#     AllowErrno         : allow known error codes for command (parameter is a list)
+#     Prerequisite       : only run the command if the prereq returns without error
+#     Timeout            : maximum execution time for the command
+#     Sidecar            : execute command when in sidecar mode
+#
+HOST_CMDS = [
+    HostCmd(['apt', 'list', '--installed']),
+    HostCmd(['blkid']),
+    HostCmd(['cat', '/proc/buddyinfo'], Sidecar=True),
+    HostCmd(['cat', '/proc/cpuinfo'], Sidecar=True),
+    HostCmd(['cat', '/proc/cmdline'], Sidecar=True),
+    HostCmd(['cat', '/proc/diskstats'], Sidecar=True),
+    HostCmd(['cat', '/proc/interrupts'], Sidecar=True),
+    HostCmd(['cat', '/proc/meminfo'], Sidecar=True),
+    HostCmd(['cat', '/proc/mounts'], Sidecar=True),
+    HostCmd(['cat', '/proc/stat'], Sidecar=True),
+    HostCmd(['cat', '/proc/sys/kernel/core_pattern'], Sidecar=True),
+    HostCmd(['cat', '/proc/vmstat'], Sidecar=True),
+    HostCmd(['chronyc', 'tracking'], Prerequisite=['systemctl', 'status', 'chronyd']),
+    HostCmd(['chronyc', 'sources'], Prerequisite=['systemctl', 'status', 'chronyd']),
+    HostCmd(['chronyc', 'sourcestats'], Prerequisite=['systemctl', 'status', 'chronyd']),
+    HostCmd(['chronyc', 'activity'], Prerequisite=['systemctl', 'status', 'chronyd']),
+    HostCmd(['date']),
+    HostCmd(['df', '-h'], Sidecar=True),
+    HostCmd(['df', '-i', '-h'], Sidecar=True),
+    HostCmd(['dmesg']),
+    HostCmd(['hostnamectl', 'status']),
+    HostCmd(['ifconfig'], Sidecar=True),
+    HostCmd(['iostat'], AllowErrno=[errno.ENOENT], Sidecar=True),
+    HostCmd(['iostat', '-x'], AllowErrno=[errno.ENOENT], Sidecar=True),
+    HostCmd(['ip', 'addr', 'show']),
+    HostCmd(['ip', 'route', 'show']),
+    HostCmd(['ip', 'tcp_metrics', 'show']),
+    HostCmd(['journalctl', '--list-boots']),
+    HostCmd(['journalctl', '-xn', '10000']),
+    HostCmd(['journalctl', '--disk-usage']),
+    HostCmd(['ls', '-Zal', '/boot']),
+    HostCmd(['mount'], Sidecar=True),
+    HostCmd(['ps', '-eLo', 'psr,ppid,pid,tid,priority,nice,vsize,rss,%cpu,%mem,start,time,cmd,label'], Sidecar=True),
+    HostCmd(['route']),
+    HostCmd(['route', '-n']),
+    HostCmd(['rpm', '-qa']),
+    HostCmd(['systemctl', '-a', 'status'], AllowErrno=[errno.ESRCH, errno.EINTR]),
+    HostCmd(['timedatectl']),
+    HostCmd(['umask', '-S'], Sidecar=True),
+    HostCmd(['uname', '-a'], Sidecar=True),
+    HostCmd(['uptime'], Sidecar=True),
+]
+
+# Diagnostic commands to run inside the Container
+#
+# The following fields are supported:
+#     AllowErrno         : allow known error codes for command (parameter is a list)
+#     Prerequisite       : only run the command if the prereq returns without error
+#     Timeout            : maximum execution time for the command
+#
+# Note, all commands are run in sidecar mode
+#
+CONTAINER_CMDS = [
+    ContainerCmd(['cat', '/proc/mounts']),
+    ContainerCmd(['ifconfig']),
+    ContainerCmd(['ip', 'addr', 'show']),
+    ContainerCmd(['ip', 'route', 'show']),
+    ContainerCmd(['ipcs', '-m']),
+    ContainerCmd(['ipcs', '-l']),
+    ContainerCmd(['ls', '-Zlr', DIAGS_DIR]),
+    ContainerCmd(['ps', '-eLo', 'psr,ppid,pid,tid,priority,nice,vsize,rss,%cpu,%mem,start,time,cmd,label']),
+    ContainerCmd(['route']),
+    ContainerCmd(['df', '-h']),
+    ContainerCmd(['df', '-i', '-h']),
+    ContainerCmd(['/usr/sw/loads/currentload/bin/get-eval-license-status', '-a'], AllowErrno=[errno.ENOENT]),
+    ContainerCmd(['/usr/sw/loads/currentload/scripts/vmr-solaudit', '-qRj'], AllowErrno=[errno.EIO]),
+    ContainerCmd(['/usr/sw/loads/currentload/bin/cli', '-AeS', '/usr/share/solace/gather-diagnostics-cli.txt'], AllowErrno=[errno.ENOENT], Timeout=60),
+    ContainerCmd(['/usr/bin/wholock'], AllowErrno=[0,1,2,99]),
+    ContainerCmd(['/usr/bin/consul', 'info', '-http-addr=unix:///var/run/solace/consul'], AllowErrno=[0,1], Timeout=60),
+    ContainerCmd(['/usr/bin/consul', 'keyring', '-list', '-http-addr=unix:///var/run/solace/consul'], AllowErrno=[0,1], Timeout=60),
+]
+
+# Container diagnostic files to capture
+#
+# The following fields are supported:
+#     ErrorOnMissing     : report an error if no files are found
+#     SkipDateCheck      : capture file regardless of last modified date
+#     Timeout            : maximum execution time for the docker/podman cp command
+#
+# Note, because '<docker|podman> cp' is used, all paths must be absolute and without wildcard
+# Note, all files are captured in sidecar mode
+#
+CONTAINER_FILES = [
+    ContainerFile('/etc/resolv.conf', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/config/sol-platform-audit.json', SkipDateCheck=True),
+    ContainerFile('/tmp/.vet', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/config/consul.conf', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/config/consul.json', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/config/home/appuser/.soltop.dat', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/secure', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/secure.1'),
+    ContainerFile('/var/lib/solace/diagnostics/secure.2'),
+    ContainerFile('/var/lib/solace/diagnostics/secure.3'),
+    ContainerFile('/var/lib/solace/diagnostics/rsyslogd.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/confd.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/uwsgi.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/uwsgi_startup.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/sshd.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/consul.log'),
+    ContainerFile('/var/lib/solace/var/k8s_readiness_check.log', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/var/lastBrokerVersionBeforeReboot', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/var/lastConfigRevisionBeforeReboot', SkipDateCheck=True),
+    ContainerFile('/tmp/activity_state', SkipDateCheck=True),
+    ContainerFile('/var/lib/solace/diagnostics/activity_state', SkipDateCheck=True),
+    ContainerFile('/usr/sw/loads/currentload/webclient.md5sum', SkipDateCheck=True)
+]
+
+# Container persistent data files to capture
+#
+#     ErrorOnMissing     : report an error if no files are found
+#     DontKeepOldFiles   : do not capture the one newest file matching the pattern if none have been modified within the capture time
+#     SkipDateCheck      : capture files matching the pattern regardless of last modified date
+#     SizeLimit          : maximum total size of all files captured matching the pattern, in bytes
+#
+# Note, these files will only be collected if it is contained in a bind-mounted directory, i.e. it must be in a volume, this is not
+# much of a risk for jail and var (these are required volumes), but if the /var/lib/solace/diags is not bind-mounted, those files
+# will not be collected
+#
+# Note, all files are captured in sidecar mode
+#
+PERSISTENT_FILES = [
+    PersistentFile('jail', '/usr/sw/jail', 'configs/.+[.]initrc', SkipDateCheck=True),
+    PersistentFile('jail', '/usr/sw/jail', 'configs/db.corrupt.*'),
+    PersistentFile('jail', '/usr/sw/jail', 'logs/.+'),
+    PersistentFile('var', '/usr/sw/var', '__SOL_VERSION__/.dbHistory/.+', SkipDateCheck=True),
+    PersistentFile('var', '/usr/sw/var', '__SOL_VERSION__/db', SkipDateCheck=True),
+    PersistentFile('var', '/usr/sw/var', 'solServiceStates.json', SkipDateCheck=True),
+    PersistentFile('var', '/usr/sw/var', '.uniqueNodeId', SkipDateCheck=True),
+    PersistentFile('diagnostics', DIAGS_DIR, 'core.+', SizeLimit=6000000000,
+                   DontKeepOldFiles=True, RemoveOnCapture=True),
+    PersistentFile('diagnostics', DIAGS_DIR, 'ad.debug.+', SizeLimit=3000000000, DontKeepOldFiles=True),
+    PersistentFile('diagnostics', DIAGS_DIR, 'system-resources.+'),
+    PersistentFile('diagnostics', DIAGS_DIR, 'shutdownMessage'),
+    PersistentFile('diagnostics', DIAGS_DIR, 'messages.*'),
+]
+
+filesToBeRemoved_g = FilesToBeRemoved()
+
+# Main entry point
+#
+if __name__ == '__main__':
+    try:
+        parser = argparse.ArgumentParser(
+            description='gather-diagnostics-host collects diagnostics information from Solace containers. ' +
+                        'The script supports Docker and Podman container runtimes. ' +
+                        'When executed without additional command line parameters, it will collect information ' +
+                        'from all containers created from the default container image named "solapp:currentload" or, ' +
+                        'if none exist, containers using the default name "solace".  The user may specify a specific ' +
+                        'container, by name, using --name, or a specific container image using --image.  ' +
+                        'When running gather-diagnostics-host in a Docker container on a multi-tenant Docker host, ' +
+                        'use the --sidecar argument.'
+        )
+        parser.add_argument('-f', '--file', metavar='filename', default=None,
+            help='Output tarball filename, default will be used if not specified')
+        parser.add_argument('-d', '--days', metavar='days', default=1, type=int,
+            help='Number of days of history to capture')
+        parser.add_argument('-n', '--name', metavar='container', default=None,
+            help='Container name or ID, default solace')
+        parser.add_argument('-i', '--image', metavar='repository:tag', default=None,
+            help='Container Image used to find matching Containers')
+        parser.add_argument('--no-container', action="store_true", default=False,
+            help='Do not attempt to run gather-diagnostics inside the container')
+        parser.add_argument('--no-docker', action="store_true", default=False,
+            help='Deprecated. Please use --no-container instead')
+        parser.add_argument('--core-host-path', metavar='"pattern"', default=None,
+            help='Path to core files to be used as regex. Script will capture all files on the host matching pattern.*')
+        parser.add_argument('--core-pattern', metavar='"pattern"', default=None,
+            help='Deprecated. Please use --core-host-path instead.')
+        parser.add_argument('--sidecar', action="store_true", default=False,
+            help='Execute script in sidecar mode (typically in a peer container)')
+        parser.add_argument('--force-container-runtime', metavar='container_runtime', default=None,
+            choices=['docker', 'podman'], help='Force use either Docker or Podman container runtime')
+        parser.add_argument('--force-client', metavar='client_path', default=None,
+            help=argparse.SUPPRESS)
+            # help='Force use of Container Runtime Client accessible at client_path')
+        parser.add_argument('--force-api', metavar='container_runtime_socket', default=None,
+            help=argparse.SUPPRESS)
+            # help='Force use of Container Runtime Python API using supplied container_runtime_socket')
+        parser.add_argument('--no-cleanup', action="store_true", default=False,
+            help='Disable cleaning up of files collected')
+        parser.add_argument('-V', action='count', default=0,
+            help='Increase output verbosity')
+        parser.add_argument('-D', action='store_true', default=False,
+            help='Debug mode, describes utility actions without actually doing anything')
+
+        try:
+            args = parser.parse_args()
+        except SystemExit:
+            sys.exit(errno.EINVAL)
+
+        # Do some preliminary validation
+        #
+        if args.file is not None:
+            if not re.search(r'\.tgz$', args.file):
+                print("Output tarball filename ({}) must end in .tgz".format(args.file))
+                sys.exit(errno.EINVAL)
+            if os.path.exists(args.file):
+                print("Output tarball {} already exists".format(args.file))
+                sys.exit(errno.EINVAL)
+
+        if args.days < 1:
+            print("Days of history ({}) must be greater than 0".format(args.days))
+            sys.exit(errno.EINVAL)
+
+        # Check for deprecated commands
+        #
+        if args.core_pattern:
+            if args.core_host_path is None:
+                args.core_host_path = args.core_pattern
+            args.core_pattern = None
+            print("WARN: --core-pattern is deprecated. Script will run with --core-host-path \"{}\" instead".format(args.core_host_path))
+        if args.no_docker:
+            args.no_container = args.no_docker
+            args.no_docker = None
+            print("WARN: --no-docker is deprecated. Script will run with --no-container \"{}\" instead".format(args.no_container))
+
+        # Global variables
+        #
+        debugMode_g = args.D
+        redirector_g = Redirector(args.V)
+        sidecarMode_g = args.sidecar
+
+        # Determine which container runtime (Docker/Podman) to use and initialize the ContainerRuntime object
+        #
+        if (args.force_container_runtime and args.force_container_runtime == 'podman') or \
+           (not args.force_container_runtime and ContainerRuntime.determineContainerRuntime() == ContainerRuntimeType.PODMAN):
+            if args.force_api:
+                print("Podman Python API is not supported. Please run without '--force-api' option")
+                sys.exit(errno.EINVAL)
+            elif args.sidecar:
+                print("Sidecar mode is not supported with Podman. Please run without '--sidecar' option")
+                sys.exit(errno.EINVAL)
+            else:
+                containerRuntime_g = PodmanClient(args.force_client)
+        else:
+            if args.force_client:
+                containerRuntime_g = DockerDaemonClient(args.force_client)
+            elif args.force_api:
+                containerRuntime_g = DockerDaemonApi(args.force_api)
+            elif hasDockerModule_g and sidecarMode_g:
+                containerRuntime_g = DockerDaemonApi()
+            else:
+                containerRuntime_g = DockerDaemonClient()
+
+        rc = gather(args)
+        errorsWarnings_g.logErrors()
+        filesToBeRemoved_g.remove()
+        sys.exit(rc)
+
+    except UnicodeEncodeError:
+        print("UnicodeEncodeError has been detected. Please run python3 in UTF-8 encoding mode")
+        sys.exit(errno.EINVAL)
+    except Exception as e:
+        traceback.print_exc()
+        exit(errno.EPERM)

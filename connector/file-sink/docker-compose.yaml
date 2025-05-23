@@ -1,0 +1,11 @@
+services:
+  connector-file-sink:
+    image: 'solace/solace-pubsub-connector-file:2.2.0'
+    container_name: connector-file-sink
+    networks:
+    - demo-net
+    ports:
+    - 8092:8090
+    volumes:
+    - ./config/:/app/external/spring/config
+    - ./incoming/:/incoming

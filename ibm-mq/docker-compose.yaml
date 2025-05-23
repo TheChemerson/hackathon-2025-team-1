@@ -1,0 +1,21 @@
+services:
+  ibm-mq:
+    # image: icr.io/ibm-messaging/mq:latest
+    image: ibm-mqadvanced-server-dev:9.4.2.1-arm64
+    container_name: ibm-mq
+    hostname: mq
+    networks:
+      - demo-net
+    volumes: 
+      - qm1data:/mnt/mqm
+    ports:
+      - 1414:1414
+      - 9442:9443
+    environment:
+      - LICENSE=accept
+      - MQ_QMGR_NAME=QM1
+      - MQ_APP_PASSWORD=passw0rd
+      - MQ_ADMIN_PASSWORD=passw0rd    
+
+volumes:
+  qm1data:

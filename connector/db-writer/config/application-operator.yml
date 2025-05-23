@@ -1,0 +1,149 @@
+const:
+  - &solace tcp://solace:55555
+  - &vpn default
+  - &solace-user connector
+  - &solace-pwd connector
+  - &queue-name ORDER
+  - &database jdbc:sqlserver://mssql:1433;databaseName=DEMO;Encrypt=false
+  - &db-user sa
+  - &db-pwd yourStrong(!)Password
+
+server.port: 8292
+
+spring:
+  config.import: application-db-processor.yml
+  boot:
+    admin:
+      client:
+        enabled: true
+        url: 'http://localhost:8082'
+        auto-registration: true
+        instance:
+          name: MSSQL-Sink
+          service-url: 'http://localhost:${server.port}'
+    application:
+      name: MSSQL-Sink
+  cloud:
+    stream:
+      bindings:
+        input-0:
+          destination: *queue-name
+          binder: solace
+          consumer:
+            batch-mode: true
+            concurrency: 1
+            max-attempts: 2
+            back-off-initial-interval: 5000
+            back-off-multiplier: 1
+            default-retryable: true
+        output-0:
+          destination: test/passenger/lvq
+          binder: solace-db-sql
+      solace:
+        bindings:
+          input-0:
+            consumer:
+              batchMaxSize: 5
+              batchTimeout: 5000
+              provisionSubscriptionsToDurableQueue: false
+              provisionDurableQueue: false
+              queueNamePrefix: ""
+              useFamiliarityInQueueName: false
+              useDestinationEncodingInQueueName: false
+              useGroupNameInQueueName: false
+              batchWaitStrategy: IMMEDIATE
+
+solace:
+  connector:
+    workflows:
+      0:
+        enabled: true
+      1:
+        enabled: false
+    management:
+      leader-election:
+        mode: standalone
+        fail-over:
+          max-attempts: 3
+          back-off-initial-interval: 1000
+          back-off-max-interval: 10000
+          back-off-multiplier: 2
+      queue: ""
+      session:
+        host: *solace
+        msgVpn: *vpn
+        clientUsername: *solace-user
+        clientPassword: *solace-pwd
+    security.enabled: false
+  java:
+    host: *solace
+    msgVpn: *vpn
+    clientUsername: *solace-user
+    clientPassword: *solace-pwd
+    connect-retries: -1
+    reconnect-retries: -1
+
+management:
+  metrics.export.simple.enabled: true
+  endpoint:
+    logfile:
+      external-file: log/connector/runtime.log
+  endpoints:
+    jmx:
+      exposure:
+        exclude: '*'
+    web:
+      exposure:
+        include: 'health,metrics,loggers,logfile,channels,env,workflows,leaderelection,bindings'
+        exclude: 'diskSpace,mappings'
+
+logging:
+  level:
+    root: INFO
+    com.solacesystems.jcsmp: INFO
+    com.solace.spring.cloud.stream.binders.db: INFO
+    com.solace.spring: ERROR
+    org.springframework: ERROR
+    org.springframework.context.support.DefaultLifecycleProcessor: ERROR
+    org.hibernate.SQL: ERROR
+    org.hibernate.type.descriptor.sql.BasicBinder: ERROR
+    com.solace.spring.cloud.stream.binders.db.jdbc.DatabaseUtil: ERROR
+
+jasypt:
+  encryptor:
+    password: test123@!
+    algorithm: PBEWithMD5AndDES
+    iv-generator-classname: org.jasypt.iv.NoIvGenerator
+
+solace-persistence:
+  datasource:
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    url: *database
+    username: *db-user
+    password: *db-pwd    
+    hikari:
+      minimum-idle: 1
+      maximum-pool-size: 5
+      idle-timeout: 500000
+      max-lifetime: 540000
+      connection-timeout: 5000
+  jpa:
+    database: sqlserver
+    hibernate.ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        jdbc.batch_size: 100
+        order_updates: true
+        order_inserts: true
+        generate_statistics: false
+  sink:
+    db-crud-mode: sql
+    jpaBatchMode: true
+    jpaBatchSize: 5000
+    jpaMaxRetry: 2
+    jpaRetryWaitMilliseconds: 3000
+    redirectOnFailEnable: false
+    redirectPrefix: RD/
+    payloadFormat: json
+    dbUpdateFlag: true

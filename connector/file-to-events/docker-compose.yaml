@@ -1,0 +1,12 @@
+services:
+  connector-file-to-events:
+    image: solace/solace-pubsub-connector-file:2.2.0
+    container_name: connector-file-to-events
+    networks:
+    - demo-net
+    ports:
+    - 8090:8090
+    volumes:
+    - ./config/:/app/external/spring/config
+    - ./incoming/:/source
+    - ./storage/:/storage

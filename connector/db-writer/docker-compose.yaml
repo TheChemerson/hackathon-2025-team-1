@@ -1,0 +1,13 @@
+services:
+  db-writer:
+    image: pubsubplus-connector-database-sql:v1.0.0
+    container_name: db-writer
+    hostname: db-writer
+    networks:
+      - demo-net
+    environment:
+      - SOLACE_CONNECTOR_SECURITY_USERS_0_NAME=healthcheck
+      - SOLACE_CONNECTOR_SECURITY_USERS_0_PASSWORD=healthcheck
+    volumes:
+      - ./config/:/config/:ro
+      - ./libs/:/app/external/libs/:ro

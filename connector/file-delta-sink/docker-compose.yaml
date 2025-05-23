@@ -1,0 +1,11 @@
+services:
+  connector-file-delta-sink:
+    image: 'solace/solace-pubsub-connector-file:2.2.0'
+    container_name: connector-file-delta-sink
+    networks:
+      - demo-net
+    ports:
+      - 8094:8090
+    volumes:
+      - ./config/:/app/external/spring/config
+      - ./incoming/:/incoming

@@ -1,0 +1,11 @@
+services:
+  connector-file-source:
+    image: 'solace/solace-pubsub-connector-file:2.2.0'
+    container_name: connector-file-source
+    networks:
+    - demo-net
+    ports:
+    - 8091:8090
+    volumes:
+    - ./config/:/app/external/spring/config
+    - ./outgoing/:/outgoing

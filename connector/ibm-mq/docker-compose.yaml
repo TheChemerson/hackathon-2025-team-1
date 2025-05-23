@@ -1,0 +1,22 @@
+services:
+  connector:
+    image: solace/solace-pubsub-connector-ibmmq:2.6.4
+    platform: linux/amd64
+    container_name: connector-ibm-mq
+    networks:
+      - demo-net
+    deploy:
+      restart_policy:
+        condition: unless-stopped
+        delay: 5s
+    ports:
+      - 8093:8090
+    volumes:
+      - type: bind
+        source: ./libs/
+        target: /app/external/libs/
+        read_only: true
+      - type: bind
+        source: ./config/
+        target: /app/external/spring/config/
+        read_only: true

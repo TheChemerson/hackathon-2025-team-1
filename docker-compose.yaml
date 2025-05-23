@@ -1,0 +1,69 @@
+# Network declaration is optional.  However, if removed, all referenced
+# modules need to have the same modification.
+networks:
+  demo-net:
+    name: demo-net
+    external: false
+    driver: bridge
+
+include:
+  - solace/docker-compose.yaml
+
+  # # Distributed Tracing
+  # - jaeger/docker-compose.yaml
+  # - otel-collector/docker-compose.yaml
+  # # Granfana
+  # - grafana/docker-compose.yaml
+
+  # # File Mesh (Disabled by default)
+  # - file-mesh/docker-compose.yaml
+
+  # # MinIO - S3 emulator
+  # - minio/docker-compose.yaml
+
+  # Redpanda
+  - redpanda/docker-compose.yaml
+
+  # # Prometheus
+  # - prometheus/docker-compose.yaml
+
+
+
+  ##### Connectors #####
+
+  # # Connector Manager
+  # - connector-manager/docker-compose.yaml
+
+  # Connector - Debezium
+  - connector/debezium/docker-compose.yaml
+
+  # # Connector - File
+  # - connector/file-source/docker-compose.yaml
+  # - connector/file-sink/docker-compose.yaml
+
+  # # Connector - File Delta
+  # - connector/file-delta-source/docker-compose.yaml
+  # - connector/file-delta-sink/docker-compose.yaml
+
+  # # Connector - File to Events
+  # - connector-file-to-events/docker-compose.yaml
+
+  # # Connector - SFTP
+  # - connector-file-sftp/docker-compose.yaml
+  # - sftp/docker-compose.yaml
+
+  # # IBM MQ
+  - connector/ibm-mq/docker-compose.yaml
+  - ibm-mq/docker-compose.yaml
+
+  # # TIBCO EMS
+  - connector/tibco/docker-compose.yaml
+  - tibco/docker-compose.yaml
+
+
+
+  ##### Databases #####
+
+  # # MS SQL Server
+  # # - connector/db-writer/docker-compose.yaml
+  - database/mssql/docker-compose.yaml

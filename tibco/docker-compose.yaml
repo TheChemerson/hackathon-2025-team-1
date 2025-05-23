@@ -1,0 +1,11 @@
+services:
+  tibco:
+    image: demo/tibco:10.2.1
+    container_name: tibco
+    hostname: tibco
+    networks:
+      - demo-net
+    ports:
+      - 7222:7222
+    volumes:
+      - ./storage:/tmp/tibco/ems/datastore

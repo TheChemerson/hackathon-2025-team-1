@@ -1,0 +1,14 @@
+##############################
+## OS X
+##############################
+.DS_Store
+
+##############################
+## Visual Studio Code
+##############################
+.vscode/
+.code-workspace
+
+*.jar
+terraform/.terraform.lock.hcl
+/terraform/.terraform

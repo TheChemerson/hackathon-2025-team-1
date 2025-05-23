@@ -1,0 +1,39 @@
+solace-db-sql:
+  bindings:
+    output-0:
+      producer:
+        dbConnectorBlobEncoding: BASE64
+        dbConnectorTimestampFormat: 'yyyy/dd/MM HH:mm:ss'
+        dbMsgHeaderTimestampFormat: 'yyyy/dd/MM HH:mm:ss.SSS'
+        entities:
+          ORDER_COPY:
+            jsonNodePrefix: null
+            topicOperations:
+              insert:
+                topics: 
+                  - csc/cdc/order/c/*
+                sql: >
+                     EXEC dbo.PutOrder @order_num = :order_num
+                                     , @customer_num = :customer_num
+                                     , @order_amt = :order_amt
+                                     , @order_ccy = :order_ccy
+                                     , @created_dt = :created_dt
+                                     , @last_modified_dt = :last_modified_dt
+                                     , @action = 'c';
+              update:
+                topics: 
+                  - csc/cdc/order/u/*
+                sql: >
+                     EXEC dbo.PutOrder @order_num = :order_num
+                                     , @customer_num = :customer_num
+                                     , @order_amt = :order_amt
+                                     , @order_ccy = :order_ccy
+                                     , @created_dt = :created_dt
+                                     , @last_modified_dt = :last_modified_dt
+                                     , @action = 'u';
+              delete:
+                topics:
+                  - csc/cdc/order/d/*
+                sql: >
+                     EXEC dbo.PutOrder @order_num = :order_num
+                                     , @action = 'd';

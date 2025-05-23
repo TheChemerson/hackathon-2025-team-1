@@ -1,0 +1,15 @@
+services:
+  mssql:
+    # image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04
+    platform: linux/amd64
+    container_name: mssql
+    hostname: mssql
+    networks: [demo-net]
+    ports: [1433:1433]
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=yourStrong(!)Password
+      - MSSQL_AGENT_ENABLED=true
+    volumes:
+      - ./script:/script
