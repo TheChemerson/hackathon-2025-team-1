@@ -31,26 +31,15 @@ include:
 
   ##### Connectors #####
 
-  # # Connector Manager
-  # - connector-manager/docker-compose.yaml
-
   # Connector - Debezium
   - connector/debezium/docker-compose.yaml
 
-  # # Connector - File
-  # - connector/file-source/docker-compose.yaml
-  # - connector/file-sink/docker-compose.yaml
+  # Connector - File
+  - connector/file-source/docker-compose.yaml
+  - connector/file-sink/docker-compose.yaml
 
-  # # Connector - File Delta
-  # - connector/file-delta-source/docker-compose.yaml
-  # - connector/file-delta-sink/docker-compose.yaml
-
-  # # Connector - File to Events
-  # - connector-file-to-events/docker-compose.yaml
-
-  # # Connector - SFTP
-  # - connector-file-sftp/docker-compose.yaml
-  # - sftp/docker-compose.yaml
+  # Connector - File to Events
+  - connector-file-to-events/docker-compose.yaml
 
   # # IBM MQ
   - connector/ibm-mq/docker-compose.yaml
@@ -65,5 +54,5 @@ include:
   ##### Databases #####
 
   # # MS SQL Server
-  # # - connector/db-writer/docker-compose.yaml
+  - connector/db-writer/docker-compose.yaml
   - database/mssql/docker-compose.yaml
