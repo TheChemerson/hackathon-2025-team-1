@@ -15,14 +15,14 @@ include:
   # # Granfana
   # - grafana/docker-compose.yaml
 
-  # # File Mesh (Disabled by default)
-  # - file-mesh/docker-compose.yaml
-
   # # MinIO - S3 emulator
   # - minio/docker-compose.yaml
 
   # Redpanda
   - redpanda/docker-compose.yaml
+
+  # Event-management Agent
+  - ema/docker-compose.yaml
 
   # # Prometheus
   # - prometheus/docker-compose.yaml
@@ -39,7 +39,7 @@ include:
   - connector/file-sink/docker-compose.yaml
 
   # Connector - File to Events
-  - connector-file-to-events/docker-compose.yaml
+  - connector/file-to-events/docker-compose.yaml
 
   # # IBM MQ
   - connector/ibm-mq/docker-compose.yaml
@@ -54,5 +54,5 @@ include:
   ##### Databases #####
 
   # # MS SQL Server
-  - connector/db-writer/docker-compose.yaml
+  - connector/mssql-writer/docker-compose.yaml
   - database/mssql/docker-compose.yaml
