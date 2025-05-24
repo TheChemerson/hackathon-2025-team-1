@@ -1,0 +1,12 @@
+services:
+  ema:
+    image: solace/event-management-agent:latest
+    container_name: ema
+    networks:
+      - demo-net
+    ports:
+      - 8010:8010
+    env_file:
+      - .env
+    volumes:
+      - ./config/ema.yml:/config/ema.yml

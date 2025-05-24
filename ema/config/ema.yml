@@ -1,0 +1,103 @@
+springdoc:
+  packages-to-scan: com.solace.maas.ep.event.management.agent.scanManager.rest
+  api-docs:
+    path: /docs/event-management-agent
+  swagger-ui:
+    path: /event-management-agent/swagger-ui.html
+server:
+  port: 8180
+spring:
+  datasource:
+    password: dFYXkLo7Yp
+    url: jdbc:h2:file:./data/cache;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      settings:
+        web-allow-others: true
+      enabled: true
+      path: /h2
+  main:
+    allow-bean-definition-overriding: true
+  servlet:
+    multipart:
+      max-file-size: ${MAX_FILE_SIZE:5MB}
+      max-request-size: ${MAX_REQUEST_SIZE:5MB}
+  jpa:
+    defer-datasource-initialization: true
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: create-drop
+camel:
+  main:
+    use-mdc-logging: true
+kafka:
+  client:
+    config:
+      connections:
+        max-idle:
+          value: 10000
+          unit: milliseconds
+        request-timeout:
+          value: 5000
+          unit: milliseconds
+        timeout:
+          value: 60000
+          unit: milliseconds
+      reconnections:
+        max-backoff:
+          value: 1000
+          unit: milliseconds
+        backoff:
+          value: 50
+          unit: milliseconds
+eventPortal:
+  runtimeAgentId: ${EP_RUNTIME_AGENT_ID:4sf1gvri9a7}
+  organizationId: ${EP_ORGANIZATION_ID:rajmqqt7w6p}
+  gateway:
+    id: g527g4hnak7
+    name: US East EVMR
+    messaging:
+      standalone: false
+      rtoSession: false
+      enableHeartbeats: true
+      testHeartbeats: true
+      connections:
+      - name: eventPortalGateway
+        authenticationType: ${EP_GATEWAY_AUTH:basicAuthentication}
+        msgVpn: ${EP_GATEWAY_MSGVPN:us-east-evmr}
+        url: ${EP_GATEWAY_URL:tcps://prod-us-evmr.messaging.solace.cloud:55443}
+        users:
+        - password: x{+kE$MA.A%7X0PqxC6Zacz^
+          name: messaging1
+          clientName: client_4sf1gvri9a7
+          username: ${EP_GATEWAY_USERNAME:org-rajmqqt7w6p-lc0iqs5m4qn-4sf1gvri9a7}
+  topicPrefix: ${EP_TOPIC_PREFIX:sc/ep/runtime}
+plugins:
+  resources:
+  - id: xyjxtp1f40f
+    type: solace
+    name: Local
+    connections:
+    - name: Local
+      url: http://solace:8080
+      properties:
+      - value: Default
+        name: msgVpn
+      - value: 100
+        name: sempPageSize
+      authentication:
+      - properties:
+        - value: basicAuthentication
+          name: type
+        protocol: semp
+        credentials:
+        - properties:
+          - name: username
+            value: admin
+          - name: password
+            value: ${Local_SOLACE_SEMP_PASSWORD:admin}
+          source: ENVIRONMENT_VARIABLE
+          operations:
+          - name: ALL
