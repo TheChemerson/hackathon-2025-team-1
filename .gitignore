@@ -14,3 +14,4 @@
 
 .terraform.lock.hcl
 .terraform
+/tibco/storage
