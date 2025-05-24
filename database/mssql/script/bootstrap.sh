@@ -1,1 +1,1 @@
-/opt/mssql-tools18/bin/sqlcmd -U sa -P "yourStrong(!)Password" -S localhost -C -i bootstrap.sql
+/opt/mssql-tools18/bin/sqlcmd -U sa -P "yourStrong(!)Password" -S localhost -C -i /script/bootstrap.sql

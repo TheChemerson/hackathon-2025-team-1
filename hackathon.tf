@@ -259,6 +259,18 @@ resource "solacebroker_msg_vpn_queue" "default_FROM-MQ" {
 
 }
 
+resource "solacebroker_msg_vpn_queue" "default_ORDER" {
+  egress_enabled                                 = true
+  event_bind_count_threshold                     = {"clear_percent":60,"set_percent":80}
+  event_msg_spool_usage_threshold                = {"clear_percent":18,"set_percent":25}
+  event_reject_low_priority_msg_limit_threshold  = {"clear_percent":60,"set_percent":80}
+  ingress_enabled                                = true
+  msg_vpn_name                                   = solacebroker_msg_vpn.default.msg_vpn_name
+  permission                                     = "consume"
+  queue_name                                     = "ORDER"
+
+}
+
 resource "solacebroker_msg_vpn_queue" "default_TO-KAFKA" {
   egress_enabled                                 = true
   event_bind_count_threshold                     = {"clear_percent":60,"set_percent":80}

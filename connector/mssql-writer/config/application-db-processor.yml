@@ -11,7 +11,7 @@ solace-db-sql:
             topicOperations:
               insert:
                 topics: 
-                  - csc/cdc/order/c/*
+                  - acmebank/cdc/order/c/*
                 sql: >
                      EXEC dbo.PutOrder @order_num = :order_num
                                      , @customer_num = :customer_num
@@ -22,7 +22,7 @@ solace-db-sql:
                                      , @action = 'c';
               update:
                 topics: 
-                  - csc/cdc/order/u/*
+                  - acmebank/cdc/order/u/*
                 sql: >
                      EXEC dbo.PutOrder @order_num = :order_num
                                      , @customer_num = :customer_num
@@ -33,7 +33,7 @@ solace-db-sql:
                                      , @action = 'u';
               delete:
                 topics:
-                  - csc/cdc/order/d/*
+                  - acmebank/cdc/order/d/*
                 sql: >
                      EXEC dbo.PutOrder @order_num = :order_num
                                      , @action = 'd';
