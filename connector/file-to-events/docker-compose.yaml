@@ -1,6 +1,7 @@
 services:
   connector-file-to-events:
-    image: solace/solace-pubsub-connector-file:2.2.0
+    image: solace/solace-pubsub-connector-file-events:2.0.0
+    platform: linux/amd64
     container_name: connector-file-to-events
     networks:
     - demo-net

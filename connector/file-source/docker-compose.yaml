@@ -1,6 +1,7 @@
 services:
   connector-file-source:
-    image: 'solace/solace-pubsub-connector-file:2.2.0'
+    image: solace/solace-pubsub-connector-file:2.3.0
+    platform: linux/amd64
     container_name: connector-file-source
     networks:
     - demo-net
