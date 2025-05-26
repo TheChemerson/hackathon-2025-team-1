@@ -12,17 +12,18 @@ done
 
 ### module options
 enable_event_mesh=true
-enable_distributed_tracing=true
+enable_distributed_tracing=false
 enable_kafka_bridges=true
 enable_replay=false
 
 ### integration options
 enable_file_mesh=false
-enable_connector_file=true
+enable_connector_file=false
 enable_connector_file_delta=false
-enable_connector_file_to_event=true
+enable_connector_file_to_event=false
 enable_connector_ibmmq=true
 enable_connector_mongodb=false
+enable_connector_mssql=true
 enable_connector_tibco=true
 enable_connector_sftp=false
 enable_connector_s3=false
@@ -280,8 +281,9 @@ if [ "$enable_file_mesh" = true ] \
 || [ "$enable_connector_file" = true ] \
 || [ "$enable_connector_file_delta" = true ] \
 || [ "$enable_connector_file_to_event" = true ] \
-|| [ "$enable_connector_sftp" = true ] \
 || [ "$enable_connector_ibmmq" = true ] \
+|| [ "$enable_connector_mssql" = true ] \
+|| [ "$enable_connector_sftp" = true ] \
 || [ "$enable_connector_tibco" = true ] \
 || [ "$enable_connector_mongodb" = true ] ; then
 
@@ -343,6 +345,12 @@ fi  # end of Connector - SFTP
 if $enable_connector_ibmmq; then
     source semp-module/connector-ibmmq.sh
 fi  # end of Connector - IBM MQ
+
+
+##### Connector - MSSQL
+if $enable_connector_mssql; then
+    source semp-module/connector-mssql.sh
+fi  # end of Connector - MongoDb
 
 
 ##### Connector - MongoDb

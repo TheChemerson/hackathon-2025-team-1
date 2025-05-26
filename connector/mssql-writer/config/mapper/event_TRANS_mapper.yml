@@ -1,0 +1,36 @@
+solace-connector-mapper:
+  mapper-metadata:
+    source-schema-type: json
+    target-schema-type: null
+    encrypted: null
+    escape-special-characters: true
+    source-schema-name: null
+    target-schema-name: null
+  payload-mapper:
+    mapper-transactionNum:
+      source-xpath: transactionNum
+      source-datatype: string
+      target-xpath: TRANS/trans_num
+      target-datatype: int
+    mapper-accountNum:
+      source-xpath: accountNum
+      source-datatype: string
+      target-xpath: TRANS/account_num
+      target-datatype: int
+    mapper-transactionType:
+      source-xpath: transactionType
+      source-datatype: string
+      target-xpath: TRANS/trans_type
+      target-datatype: varchar
+    mapper-currency:
+      source-xpath: currency
+      source-datatype: string
+      target-xpath: TRANS/trans_ccy
+      target-datatype: varchar
+    mapper-amount:
+      source-xpath: amount
+      source-datatype: number
+      target-xpath: TRANS/trans_amt
+      target-datatype: numeric
+
+#param1 should be the same as source-xpath value

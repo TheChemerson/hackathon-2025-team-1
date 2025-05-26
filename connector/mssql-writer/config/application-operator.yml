@@ -3,7 +3,7 @@ const:
   - &vpn default
   - &solace-user connector
   - &solace-pwd connector
-  - &queue-name ORDER
+  - &queue-name TO-MSSQL
   - &database jdbc:sqlserver://mssql:1433;databaseName=DEMO;Encrypt=false
   - &db-user sa
   - &db-pwd yourStrong(!)Password

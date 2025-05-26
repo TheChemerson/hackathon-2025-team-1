@@ -61,7 +61,8 @@ file:
       fileFormat: 1
       # eventDelimiter: '|' 
       paramDelimiter: ','
-      dynamicTopic: solace/fc/event/dynamic/{Type}/{Country}/{State}
+      # dynamicTopic: solace/fc/event/dynamic/{Type}/{Country}/{State}
+      dynamicTopic: acmebank/insurance/policy/{Type}/{Country}/{State}
       paramHeaderMap: Type,AccountId,FirstName,LastName,FullName,State,Country,Status
       # jsonPath: '$.Authors[*].Books[*]'
       # xPath: '/class/student'

@@ -10,6 +10,7 @@ queue="TO-TIBCO"
 
 create_queue $queue
 create_queue_subscription $queue "connector/solace/tibco"
+create_queue_subscription $queue "acmebank/solace/core/payment/*/paid/v1/>"
 
 ### Sink
 

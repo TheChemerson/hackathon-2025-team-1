@@ -6,34 +6,16 @@ solace-db-sql:
         dbConnectorTimestampFormat: 'yyyy/dd/MM HH:mm:ss'
         dbMsgHeaderTimestampFormat: 'yyyy/dd/MM HH:mm:ss.SSS'
         entities:
-          ORDER_COPY:
+          TRANS:
             jsonNodePrefix: null
             topicOperations:
               insert:
                 topics: 
-                  - acmebank/cdc/order/c/*
+                  - acmebank/solace/core/deposit/v1/*/*/>                
+                  - acmebank/solace/core/withdrawal/v1/*/*/>                
                 sql: >
-                     EXEC dbo.PutOrder @order_num = :order_num
-                                     , @customer_num = :customer_num
-                                     , @order_amt = :order_amt
-                                     , @order_ccy = :order_ccy
-                                     , @created_dt = :created_dt
-                                     , @last_modified_dt = :last_modified_dt
-                                     , @action = 'c';
-              update:
-                topics: 
-                  - acmebank/cdc/order/u/*
-                sql: >
-                     EXEC dbo.PutOrder @order_num = :order_num
-                                     , @customer_num = :customer_num
-                                     , @order_amt = :order_amt
-                                     , @order_ccy = :order_ccy
-                                     , @created_dt = :created_dt
-                                     , @last_modified_dt = :last_modified_dt
-                                     , @action = 'u';
-              delete:
-                topics:
-                  - acmebank/cdc/order/d/*
-                sql: >
-                     EXEC dbo.PutOrder @order_num = :order_num
-                                     , @action = 'd';
+                     EXEC dbo.PutTrans @trans_num = :trans_num
+                                     , @account_num = :account_num
+                                     , @trans_type = :trans_type
+                                     , @trans_amt = :trans_amt
+                                     , @trans_ccy = :trans_ccy;

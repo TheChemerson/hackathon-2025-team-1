@@ -94,7 +94,7 @@ cdc:
     # dynamicDestination: # overwrites the solace topic configured in line #9 Users can configure "dynamicDestination" property to build dynamic topic based on table, operation and column data. For example orders:spring/cdc/mssql/{tablename}/{operation}/APAC/{col|order_id};users:spring/cdc/mssql/{tablename}/{operation}/{col|user_id}.
     # # So orders table topic will be constructed as spring/cdc/mssql/orders/c/APAC/ORD_12 and same convention follows for users table spring/cdc/mssql/users/c/USR_12
     # # If column names are incorrect the connector will fail if failIfDynamicDestinationMismatch is set to true or fallback to output destination(Static topic) if failIfDynamicDestinationMismatch is set to false.
-    dynamicDestination: CUSTOMER:acmebank/cdc/customer/{operation}/{col|customer_num};CUSTOMER_ORDER:acmebank/cdc/order/{operation}/{col|order_num}
+    dynamicDestination: CUSTOMER:acmebank/customer/{operation}/{col|customer_num};CUSTOMER_ORDER:acmebank/merch/order/{operation}/{col|order_num}
   schema: false # This has to be sync as per the value below
   # If flattening is true only the changed record will be published
   flattening.enabled: true

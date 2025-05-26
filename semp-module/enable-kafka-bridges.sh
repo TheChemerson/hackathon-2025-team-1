@@ -9,7 +9,8 @@ create_kafka_bridge() {
 
     queue="TO-"$queue_suffix
     create_queue $queue
-    create_queue_subscription $queue "Insurance/>"
+    create_queue_subscription $queue $local_topic
+    create_queue_subscription $queue "acmebank/customer/*/*"
             
     printf "Creating Kafka sender...  "
     post_semp2  "/kafkaSenders" \

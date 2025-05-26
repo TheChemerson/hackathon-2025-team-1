@@ -34,12 +34,12 @@ include:
   # Connector - Debezium
   - connector/debezium/docker-compose.yaml
 
-  # Connector - File
-  - connector/file-source/docker-compose.yaml
-  - connector/file-sink/docker-compose.yaml
+  # # Connector - File
+  # - connector/file-source/docker-compose.yaml
+  # - connector/file-sink/docker-compose.yaml
 
-  # Connector - File to Events
-  - connector/file-to-events/docker-compose.yaml
+  # # Connector - File to Events
+  # - connector/file-to-events/docker-compose.yaml
 
   # # IBM MQ
   - connector/ibm-mq/docker-compose.yaml
